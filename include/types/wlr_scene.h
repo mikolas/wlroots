@@ -9,4 +9,10 @@ void scene_node_get_size(struct wlr_scene_node *node, int *width, int *height);
 
 void scene_surface_set_clip(struct wlr_scene_surface *surface, struct wlr_box *clip);
 
+struct wlr_kfx_node_hook;
+struct wlr_output;
+
+struct wlr_kfx_node_hook *kfx_scene_node_get_hook(struct wlr_scene_node *node);
+bool kfx_output_requires_two_pass(struct wlr_output *output);
+
 #endif

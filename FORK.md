@@ -41,7 +41,8 @@ Any break of the rules above is listed here with what breaks, why, the alternati
 
 | Patch | Layer | Status | Touches |
 | :--- | :--- | :--- | :--- |
-| _(none yet; `kajo-0.20.2-fx2` is upstream 0.20.2 plus this file)_ | | | |
+| `kfx: add build feature flag (WLR_HAS_KFX, have_kfx) and Vulkan custom shader draw (X1, X6)` | `kajo-only` | `local` | `meson.build`, `include/wlr/config.h.in`, `include/render/vulkan.h`, `render/meson.build`, `render/vulkan/meson.build`, `render/vulkan/pass.c`, `render/vulkan/renderer.c` |
+| `kfx: add scene leaf-node render hooks (X4) and two-pass pathway tracking (X6)` | `kajo-only` | `local` | `include/types/wlr_scene.h`, `types/meson.build`, `types/scene/wlr_scene.c` |
 
 Status values: `local`, `submitted !<MR>`, `merged in <version>`, `dropped (<reason>)`. "Touches" lists modified upstream files; new files are not listed.
 

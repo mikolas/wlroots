@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wlr/backend.h>
+#include <wlr/kfx/render.h>
+#include <wlr/kfx/scene.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/render/drm_syncobj.h>
 #include <wlr/render/wlr_renderer.h>
@@ -1478,6 +1480,21 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 	logical_to_buffer_coords(&opaque, data, false);
 	pixman_region32_subtract(&opaque, &render_region, &opaque);
 
+	struct wlr_kfx_node_hook *kfx_hook = kfx_scene_node_get_hook(node);
+	struct wlr_kfx_render_ctx kfx_ctx = {
+		.render_pass = data->render_pass,
+		.dst_box = dst_box,
+		.clip = &render_region,
+		.output = data->output,
+	};
+	if (kfx_hook != NULL && kfx_hook->stage == WLR_KFX_BEFORE) {
+		kfx_hook->impl->render(kfx_hook, WLR_KFX_BEFORE, &kfx_ctx);
+	}
+	if (kfx_hook != NULL && kfx_hook->stage == WLR_KFX_INSTEAD) {
+		kfx_hook->impl->render(kfx_hook, WLR_KFX_INSTEAD, &kfx_ctx);
+		goto done;
+	}
+
 	switch (node->type) {
 	case WLR_SCENE_NODE_TREE:
 		assert(false);
@@ -1577,6 +1594,11 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		break;
 	}
 
+	if (kfx_hook != NULL && kfx_hook->stage == WLR_KFX_AFTER) {
+		kfx_hook->impl->render(kfx_hook, WLR_KFX_AFTER, &kfx_ctx);
+	}
+
+done:
 	pixman_region32_fini(&opaque);
 	pixman_region32_fini(&render_region);
 }
@@ -1934,11 +1956,14 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 		return false;
 	}
 
+	bool has_kfx_hook = kfx_scene_node_get_hook(node) != NULL;
+
 	// While rendering, the background should always be black. If we see a
 	// black rect, we can ignore rendering everything under the rect, and
 	// unless fractional scale is used even the rect itself (to avoid running
 	// into issues regarding damage region expansion).
 	if (node->type == WLR_SCENE_NODE_RECT && data->calculate_visibility &&
+			!has_kfx_hook &&
 			(!data->fractional_scale || data->render_list->size == 0)) {
 		struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
 		float *black = (float[4]){ 0.f, 0.f, 0.f, 1.f };
@@ -1950,6 +1975,7 @@ static bool construct_render_list_iterator(struct wlr_scene_node *node,
 
 	// Apply the same special-case to black opaque single-pixel buffers
 	if (node->type == WLR_SCENE_NODE_BUFFER && data->calculate_visibility &&
+			!has_kfx_hook &&
 			(!data->fractional_scale || data->render_list->size == 0)) {
 		struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
 
@@ -2438,13 +2464,24 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 
 	wlr_output_state_set_damage(state, &scene_output->pending_commit_damage);
 
+	bool kfx_active = kfx_output_requires_two_pass(output);
+	if (!kfx_active) {
+		for (int i = 0; i < list_len; i++) {
+			if (kfx_scene_node_get_hook(list_data[i].node) != NULL) {
+				kfx_active = true;
+				break;
+			}
+		}
+	}
+
 	// We only want to try direct scanout if:
 	// - There is only one entry in the render list
+	// - No effect hooks are attached to the output or rendered nodes
 	// - There are no color transforms that need to be applied
 	// - Damage highlight debugging is not enabled
 	enum scene_direct_scanout_result scanout_result = SCANOUT_INELIGIBLE;
-	if (options->color_transform == NULL && !render_gamma_lut && list_len == 1
-			&& debug_damage != WLR_SCENE_DEBUG_DAMAGE_HIGHLIGHT) {
+	if (!kfx_active && options->color_transform == NULL && !render_gamma_lut &&
+			list_len == 1 && debug_damage != WLR_SCENE_DEBUG_DAMAGE_HIGHLIGHT) {
 		scanout_result = scene_entry_try_direct_scanout(&list_data[0], state, &render_data);
 	}
 
@@ -2517,13 +2554,13 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	}
 
 	scene_output->in_point++;
-	struct wlr_render_pass *render_pass = wlr_renderer_begin_buffer_pass(output->renderer, buffer,
-			&(struct wlr_buffer_pass_options){
+	struct wlr_render_pass *render_pass = wlr_kfx_renderer_begin_buffer_pass(
+			output->renderer, buffer, &(struct wlr_buffer_pass_options){
 		.timer = timer ? timer->render_timer : NULL,
 		.color_transform = scene_output->combined_color_transform,
 		.signal_timeline = scene_output->in_timeline,
 		.signal_point = scene_output->in_point,
-	});
+	}, kfx_active);
 	if (render_pass == NULL) {
 		wlr_buffer_unlock(buffer);
 		return false;
