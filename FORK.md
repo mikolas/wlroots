@@ -11,7 +11,26 @@ This repository is a fork of [wlroots](https://gitlab.freedesktop.org/wlroots/wl
 | `kajo-<base>-fx<N>` tags | a commit on `kajo/<base>` | The commit Kajo pins; never rewritten |
 | `topic/<name>` | upstream `master` | A generic change prepared for an upstream merge request |
 
-Patches are ordered in two layers: **upstreamable** patches (fixes, generic API) first, **kajo-only** patches (effects, policy) on top. A kajo-only patch may depend on an upstreamable one, never the other way round. Contributions go upstream as merge requests on gitlab.freedesktop.org, ported onto upstream `master`.
+Patches are ordered in two layers: **upstreamable** patches (fixes, generic API) first, **kajo-only** patches (effects, policy) on top. A kajo-only patch may depend on an upstreamable one, never the other way round. Pinned commits are never rewritten, so patches added between base moves go on top in any order; the two-layer order is restored when the series moves to a new upstream release. Contributions go upstream as merge requests on gitlab.freedesktop.org, ported onto upstream `master` with upstream naming.
+
+## Compatibility with upstream
+
+This fork is upstream wlroots plus additive extensions. It can be swapped into any build that uses upstream wlroots of the same version, and everything keeps working.
+
+- Every meson option keeps upstream's default; no upstream option, renderer, backend, allocator or protocol implementation is removed.
+- Existing public struct layouts, function signatures, enum values and macro meanings are never changed (API and ABI compatible). New state lives in new structs, side tables or hooks.
+- With no extension enabled, rendering, damage tracking and performance are identical to upstream.
+- New public symbols use the `wlr_kfx_` prefix and new public headers live in `include/wlr/kfx/`. Private helpers do not start with `wlr_`.
+- Extensions are detectable at build time through `WLR_HAS_KFX` in `<wlr/config.h>` and the `have_kfx` pkg-config variable (added with the first API patch).
+- Project version, pkg-config name (`wlroots-0.20`) and library name stay upstream's.
+
+## Compatibility exceptions
+
+Any break of the rules above is listed here with what breaks, why, the alternatives that were rejected, and the feature macro that lets dependents detect it.
+
+| Exception | Breaks | Why | Alternatives rejected | Feature macro |
+| :--- | :--- | :--- | :--- | :--- |
+| _(none)_ | | | | |
 
 ## Current base
 
@@ -22,7 +41,7 @@ Patches are ordered in two layers: **upstreamable** patches (fixes, generic API)
 
 | Patch | Layer | Status | Touches |
 | :--- | :--- | :--- | :--- |
-| _(none yet; `kajo-0.20.2-fx1` is upstream 0.20.2 plus this file)_ | | | |
+| _(none yet; `kajo-0.20.2-fx2` is upstream 0.20.2 plus this file)_ | | | |
 
 Status values: `local`, `submitted !<MR>`, `merged in <version>`, `dropped (<reason>)`. "Touches" lists modified upstream files; new files are not listed.
 
