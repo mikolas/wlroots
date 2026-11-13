@@ -286,6 +286,8 @@ struct wlr_vk_command_buffer {
 	VkSemaphore binary_semaphore;
 
 	struct wl_array wait_semaphores; // VkSemaphore
+
+	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
 };
 
 #define VULKAN_COMMAND_BUFFERS_CAP 64
@@ -355,6 +357,8 @@ struct wlr_vk_renderer {
 		VkImage dst_image;
 		VkDeviceMemory dst_img_memory;
 	} read_pixels_cache;
+
+	struct kfx_vk_state *kfx;
 };
 
 // vertex shader push constant range data
@@ -433,10 +437,20 @@ struct wlr_vk_render_pass {
 	uint64_t signal_point;
 
 	struct wl_array textures; // struct wlr_vk_render_pass_texture
+
+	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
 };
+
+bool vulkan_render_pass_is_vk(struct wlr_render_pass *wlr_pass);
+struct wlr_vk_render_pass *vulkan_get_render_pass(struct wlr_render_pass *wlr_pass);
+void vulkan_render_pass_mark_box_updated(struct wlr_vk_render_pass *pass,
+	const struct wlr_box *box);
 
 struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *renderer,
 	struct wlr_vk_render_buffer *buffer, const struct wlr_buffer_pass_options *options);
+struct wlr_vk_render_pass *vulkan_begin_render_pass_with_flags(struct wlr_vk_renderer *renderer,
+	struct wlr_vk_render_buffer *buffer, const struct wlr_buffer_pass_options *options,
+	bool force_two_pass);
 
 // Suballocates a buffer span with the given size that can be mapped
 // and used as staging buffer. The allocation is implicitly released when the

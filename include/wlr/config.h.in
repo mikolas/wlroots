@@ -73,4 +73,12 @@
  */
 #mesondefine WLR_HAS_COLOR_MANAGEMENT
 
+/**
+ * Whether KFX effect extensions are compile-time enabled.
+ * Equivalent to the pkg-config "have_kfx" variable.
+ *
+ * Required for <wlr/kfx/…>.
+ */
+#mesondefine WLR_HAS_KFX
+
 #endif

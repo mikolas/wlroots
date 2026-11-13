@@ -77,6 +77,7 @@ features = {
 	'udmabuf-allocator': false,
 	'session': false,
 	'color-management': false,
+	'kfx': true,
 }
 internal_features = {
 	'xcb-errors': false,

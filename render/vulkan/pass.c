@@ -7,16 +7,25 @@
 #include <wlr/render/drm_syncobj.h>
 
 #include "render/color.h"
+#include "render/kfx.h"
 #include "render/vulkan.h"
 #include "util/matrix.h"
 
 static const struct wlr_render_pass_impl render_pass_impl;
 static const struct wlr_addon_interface vk_color_transform_impl;
 
-static struct wlr_vk_render_pass *get_render_pass(struct wlr_render_pass *wlr_pass) {
+bool vulkan_render_pass_is_vk(struct wlr_render_pass *wlr_pass) {
+	return wlr_pass != NULL && wlr_pass->impl == &render_pass_impl;
+}
+
+struct wlr_vk_render_pass *vulkan_get_render_pass(struct wlr_render_pass *wlr_pass) {
 	assert(wlr_pass->impl == &render_pass_impl);
 	struct wlr_vk_render_pass *pass = wl_container_of(wlr_pass, pass, base);
 	return pass;
+}
+
+static struct wlr_vk_render_pass *get_render_pass(struct wlr_render_pass *wlr_pass) {
+	return vulkan_get_render_pass(wlr_pass);
 }
 
 static struct wlr_vk_color_transform *get_color_transform(
@@ -92,6 +101,7 @@ static void render_pass_destroy(struct wlr_vk_render_pass *pass) {
 		wlr_drm_syncobj_timeline_unref(pass_texture->wait_timeline);
 	}
 
+	kfx_vk_pass_cleanup(pass);
 	wlr_color_transform_unref(pass->color_transform);
 	wlr_drm_syncobj_timeline_unref(pass->signal_timeline);
 	rect_union_finish(&pass->updated_region);
@@ -648,6 +658,7 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		wlr_log(WLR_ERROR, "Failed to sync render buffer");
 	}
 
+	kfx_vk_pass_submit(pass);
 	render_pass_destroy(pass);
 	wlr_buffer_unlock(render_buffer->wlr_buffer);
 	return true;
@@ -679,6 +690,11 @@ static void render_pass_mark_box_updated(struct wlr_vk_render_pass *pass,
 		.y2 = box->y + box->height,
 	};
 	rect_union_add(&pass->updated_region, pixman_box);
+}
+
+void vulkan_render_pass_mark_box_updated(struct wlr_vk_render_pass *pass,
+		const struct wlr_box *box) {
+	render_pass_mark_box_updated(pass, box);
 }
 
 static void render_pass_add_rect(struct wlr_render_pass *wlr_pass,
@@ -1218,6 +1234,12 @@ static const struct wlr_addon_interface vk_color_transform_impl = {
 
 struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *renderer,
 		struct wlr_vk_render_buffer *buffer, const struct wlr_buffer_pass_options *options) {
+	return vulkan_begin_render_pass_with_flags(renderer, buffer, options, false);
+}
+
+struct wlr_vk_render_pass *vulkan_begin_render_pass_with_flags(struct wlr_vk_renderer *renderer,
+		struct wlr_vk_render_buffer *buffer, const struct wlr_buffer_pass_options *options,
+		bool force_two_pass) {
 	uint32_t inv_eotf;
 	if (options != NULL && options->color_transform != NULL) {
 		if (options->color_transform->type == COLOR_TRANSFORM_INVERSE_EOTF) {
@@ -1233,10 +1255,13 @@ struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *rend
 		inv_eotf = WLR_COLOR_TRANSFER_FUNCTION_GAMMA22;
 	}
 
-	bool using_linear_pathway = inv_eotf == WLR_COLOR_TRANSFER_FUNCTION_EXT_LINEAR;
-	bool using_srgb_pathway = inv_eotf == WLR_COLOR_TRANSFER_FUNCTION_SRGB &&
+	bool using_linear_pathway = !force_two_pass &&
+		inv_eotf == WLR_COLOR_TRANSFER_FUNCTION_EXT_LINEAR;
+	bool using_srgb_pathway = !force_two_pass &&
+		inv_eotf == WLR_COLOR_TRANSFER_FUNCTION_SRGB &&
 		buffer->srgb.out.framebuffer != VK_NULL_HANDLE;
-	bool using_two_pass_pathway = !using_linear_pathway && !using_srgb_pathway;
+	bool using_two_pass_pathway = force_two_pass ||
+		(!using_linear_pathway && !using_srgb_pathway);
 
 	if (using_linear_pathway && !buffer->linear.out.image_view) {
 		struct wlr_dmabuf_attributes attribs;
@@ -1288,6 +1313,7 @@ struct wlr_vk_render_pass *vulkan_begin_render_pass(struct wlr_vk_renderer *rend
 	}
 
 	wlr_render_pass_init(&pass->base, &render_pass_impl);
+	wl_list_init(&pass->kfx_ubo_slabs);
 	pass->renderer = renderer;
 	pass->two_pass = using_two_pass_pathway;
 	if (options != NULL && options->color_transform != NULL) {

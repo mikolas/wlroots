@@ -20,6 +20,7 @@
 #include <xf86drm.h>
 
 #include "render/dmabuf.h"
+#include "render/kfx.h"
 #include "render/pixel_format.h"
 #include "render/vulkan.h"
 #include "render/vulkan/shaders/common.vert.h"
@@ -449,6 +450,7 @@ static bool init_command_buffer(struct wlr_vk_command_buffer *cb,
 	};
 	wl_list_init(&cb->destroy_textures);
 	wl_list_init(&cb->stage_buffers);
+	wl_list_init(&cb->kfx_ubo_slabs);
 	return true;
 }
 
@@ -495,6 +497,8 @@ static void release_command_buffer_resources(struct wlr_vk_command_buffer *cb,
 		wlr_color_transform_unref(cb->color_transform);
 		cb->color_transform = NULL;
 	}
+
+	kfx_vk_cb_release(cb, renderer);
 }
 
 static struct wlr_vk_command_buffer *get_command_buffer(
@@ -561,6 +565,7 @@ static struct wlr_vk_command_buffer *get_command_buffer(
 	if (!vulkan_wait_command_buffer(wait, renderer)) {
 		return NULL;
 	}
+	kfx_vk_cb_release(wait, renderer);
 	return wait;
 }
 
@@ -1182,6 +1187,8 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyShaderModule(dev->dev, renderer->quad_frag_module, NULL);
 	vkDestroyShaderModule(dev->dev, renderer->output_module, NULL);
 
+	kfx_vk_renderer_finish(renderer);
+
 	struct wlr_vk_pipeline_layout *pipeline_layout, *pipeline_layout_tmp;
 	wl_list_for_each_safe(pipeline_layout, pipeline_layout_tmp,
 			&renderer->pipeline_layouts, link) {
@@ -1465,8 +1472,9 @@ static int vulkan_get_drm_fd(struct wlr_renderer *wlr_renderer) {
 	return renderer->dev->drm_fd;
 }
 
-static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr_renderer,
-		struct wlr_buffer *buffer, const struct wlr_buffer_pass_options *options) {
+struct wlr_render_pass *vulkan_begin_buffer_pass_with_flags(struct wlr_renderer *wlr_renderer,
+		struct wlr_buffer *buffer, const struct wlr_buffer_pass_options *options,
+		bool force_two_pass) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 
 	struct wlr_vk_render_buffer *render_buffer = get_render_buffer(renderer, buffer);
@@ -1477,12 +1485,17 @@ static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr
 		}
 	}
 
-	struct wlr_vk_render_pass *render_pass = vulkan_begin_render_pass(
-		renderer, render_buffer, options);
+	struct wlr_vk_render_pass *render_pass = vulkan_begin_render_pass_with_flags(
+		renderer, render_buffer, options, force_two_pass);
 	if (render_pass == NULL) {
 		return NULL;
 	}
 	return &render_pass->base;
+}
+
+static struct wlr_render_pass *vulkan_begin_buffer_pass(struct wlr_renderer *wlr_renderer,
+		struct wlr_buffer *buffer, const struct wlr_buffer_pass_options *options) {
+	return vulkan_begin_buffer_pass_with_flags(wlr_renderer, buffer, options, false);
 }
 
 static const struct wlr_renderer_impl renderer_impl = {

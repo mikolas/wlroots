@@ -11,6 +11,7 @@ wlr_files += files(
 	'drm_format_set.c',
 	'drm_syncobj_merger.c',
 	'drm_syncobj.c',
+	'kfx.c',
 	'pass.c',
 	'pixel_format.c',
 	'swapchain.c',
