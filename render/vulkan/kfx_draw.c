@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,6 +15,8 @@
 
 #define KFX_UBO_SLAB_SIZE (64 * 1024)
 #define KFX_UBO_POOL_SETS 32
+#define KFX_TARGET_BUCKET_ALIGN 64
+#define KFX_TARGET_MAX_DIM 16384
 
 struct kfx_vk_ubo_pool {
 	struct wl_list link;
@@ -29,6 +32,29 @@ struct kfx_vk_ubo_slab {
 	VkDeviceSize size;
 	VkDeviceSize used;
 	VkDescriptorSet ds;
+};
+
+struct kfx_vk_temp_ds {
+	struct wl_list link;
+	struct wlr_vk_descriptor_pool *pool;
+	VkDescriptorSet ds;
+};
+
+struct wlr_kfx_target {
+	struct wl_list link; // kfx_vk_state.targets
+	struct wlr_vk_renderer *renderer;
+	struct wlr_vk_render_format_setup *render_setup;
+	int width;
+	int height;
+	VkImage image;
+	VkDeviceMemory memory;
+	VkImageView image_view;
+	VkFramebuffer framebuffer;
+	struct wlr_vk_descriptor_pool *ds_pool;
+	VkDescriptorSet ds_single;
+	bool transitioned;
+	bool in_use;
+	uint64_t last_used_timeline_point;
 };
 
 struct kfx_vk_pipeline_entry {
@@ -56,6 +82,7 @@ struct kfx_vk_state {
 	struct wl_list ubo_pools;  // kfx_vk_ubo_pool.link
 	struct wl_list slabs_free; // kfx_vk_ubo_slab.link
 	struct wl_list shaders;    // wlr_kfx_shader.link
+	struct wl_list targets;    // wlr_kfx_target.link
 };
 
 static VkDeviceSize align_up_size(VkDeviceSize v, VkDeviceSize align) {
@@ -90,6 +117,7 @@ static struct kfx_vk_state *kfx_vk_ensure_state(struct wlr_vk_renderer *renderer
 	wl_list_init(&kfx->ubo_pools);
 	wl_list_init(&kfx->slabs_free);
 	wl_list_init(&kfx->shaders);
+	wl_list_init(&kfx->targets);
 
 	VkPhysicalDeviceProperties phdev_props = {0};
 	vkGetPhysicalDeviceProperties(renderer->dev->phdev, &phdev_props);
@@ -619,6 +647,238 @@ void kfx_vk_shader_destroy(struct wlr_kfx_shader *shader) {
 	free(shader);
 }
 
+static void kfx_target_destroy(struct wlr_kfx_target *target) {
+	if (target == NULL) {
+		return;
+	}
+	struct wlr_vk_renderer *renderer = target->renderer;
+	VkDevice dev = renderer->dev->dev;
+	wl_list_remove(&target->link);
+	if (target->ds_pool != NULL) {
+		vulkan_free_ds(renderer, target->ds_pool, target->ds_single);
+	}
+	if (target->framebuffer != VK_NULL_HANDLE) {
+		vkDestroyFramebuffer(dev, target->framebuffer, NULL);
+	}
+	if (target->image_view != VK_NULL_HANDLE) {
+		vkDestroyImageView(dev, target->image_view, NULL);
+	}
+	if (target->image != VK_NULL_HANDLE) {
+		vkDestroyImage(dev, target->image, NULL);
+	}
+	if (target->memory != VK_NULL_HANDLE) {
+		vkFreeMemory(dev, target->memory, NULL);
+	}
+	free(target);
+}
+
+struct wlr_kfx_target *kfx_vk_target_acquire(struct wlr_renderer *wlr_renderer,
+		int req_width, int req_height) {
+	if (wlr_renderer == NULL || req_width <= 0 || req_height <= 0 ||
+			req_width > KFX_TARGET_MAX_DIM || req_height > KFX_TARGET_MAX_DIM) {
+		return NULL;
+	}
+
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
+	struct kfx_vk_state *kfx = kfx_vk_ensure_state(renderer);
+	if (kfx == NULL) {
+		return NULL;
+	}
+
+	int width = (req_width + KFX_TARGET_BUCKET_ALIGN - 1) & ~(KFX_TARGET_BUCKET_ALIGN - 1);
+	int height = (req_height + KFX_TARGET_BUCKET_ALIGN - 1) & ~(KFX_TARGET_BUCKET_ALIGN - 1);
+
+	struct wlr_kfx_target *cand;
+	wl_list_for_each(cand, &kfx->targets, link) {
+		if (!cand->in_use && cand->width == width && cand->height == height) {
+			cand->in_use = true;
+			return cand;
+		}
+	}
+
+	const struct wlr_vk_format *fmt = vulkan_get_format_from_drm(DRM_FORMAT_ABGR16161616F);
+	if (fmt == NULL) {
+		wlr_log(WLR_ERROR, "DRM_FORMAT_ABGR16161616F not found in Vulkan format table");
+		return NULL;
+	}
+
+	struct wlr_vk_render_format_setup *setup =
+		vulkan_find_or_create_render_setup(renderer, fmt, false, false);
+	if (setup == NULL) {
+		return NULL;
+	}
+
+	struct wlr_kfx_target *target = calloc(1, sizeof(*target));
+	if (target == NULL) {
+		wlr_log_errno(WLR_ERROR, "Allocation failed");
+		return NULL;
+	}
+	wl_list_init(&target->link);
+	target->renderer = renderer;
+	target->render_setup = setup;
+	target->width = width;
+	target->height = height;
+
+	VkDevice dev = renderer->dev->dev;
+	VkImageCreateInfo img_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = VK_FORMAT_R16G16B16A16_SFLOAT,
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.extent = { .width = (uint32_t)width, .height = (uint32_t)height, .depth = 1 },
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+	};
+	VkResult res = vkCreateImage(dev, &img_info, NULL, &target->image);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImage", res);
+		goto error;
+	}
+
+	VkMemoryRequirements mem_reqs;
+	vkGetImageMemoryRequirements(dev, target->image, &mem_reqs);
+
+	int mem_type = vulkan_find_mem_type(renderer->dev,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_reqs.memoryTypeBits);
+	if (mem_type < 0) {
+		wlr_log(WLR_ERROR, "Failed to find device-local memory type for KFX target");
+		goto error;
+	}
+
+	VkMemoryAllocateInfo mem_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = mem_reqs.size,
+		.memoryTypeIndex = (uint32_t)mem_type,
+	};
+	res = vkAllocateMemory(dev, &mem_info, NULL, &target->memory);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkAllocateMemory", res);
+		goto error;
+	}
+
+	res = vkBindImageMemory(dev, target->image, target->memory, 0);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkBindImageMemory", res);
+		goto error;
+	}
+
+	VkImageViewCreateInfo view_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = target->image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = VK_FORMAT_R16G16B16A16_SFLOAT,
+		.components = {
+			.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+			.g = VK_COMPONENT_SWIZZLE_IDENTITY,
+			.b = VK_COMPONENT_SWIZZLE_IDENTITY,
+			.a = VK_COMPONENT_SWIZZLE_IDENTITY,
+		},
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+	res = vkCreateImageView(dev, &view_info, NULL, &target->image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView", res);
+		goto error;
+	}
+
+	VkFramebufferCreateInfo fb_info = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.renderPass = setup->render_pass,
+		.attachmentCount = 1,
+		.pAttachments = &target->image_view,
+		.width = (uint32_t)width,
+		.height = (uint32_t)height,
+		.layers = 1,
+	};
+	res = vkCreateFramebuffer(dev, &fb_info, NULL, &target->framebuffer);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateFramebuffer", res);
+		goto error;
+	}
+
+	target->ds_pool = vulkan_alloc_texture_ds(renderer,
+		kfx->sampler_ds_layouts[1], &target->ds_single);
+	if (target->ds_pool == NULL) {
+		wlr_log(WLR_ERROR, "Failed to allocate descriptor set for KFX target");
+		goto error;
+	}
+
+	VkDescriptorImageInfo ds_img_info = {
+		.sampler = VK_NULL_HANDLE,
+		.imageView = target->image_view,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	VkWriteDescriptorSet ds_write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = target->ds_single,
+		.dstBinding = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &ds_img_info,
+	};
+	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
+
+	target->in_use = true;
+	wl_list_insert(&kfx->targets, &target->link);
+	return target;
+
+error:
+	kfx_target_destroy(target);
+	return NULL;
+}
+
+void kfx_vk_target_release(struct wlr_kfx_target *target) {
+	if (target == NULL) {
+		return;
+	}
+	target->in_use = false;
+}
+
+void kfx_vk_target_get_size(struct wlr_kfx_target *target,
+		int *width, int *height) {
+	if (target == NULL) {
+		return;
+	}
+	if (width != NULL) {
+		*width = target->width;
+	}
+	if (height != NULL) {
+		*height = target->height;
+	}
+}
+
+struct wlr_render_pass *kfx_vk_target_begin_pass(struct wlr_kfx_target *target) {
+	if (target == NULL || !target->in_use) {
+		return NULL;
+	}
+	struct wlr_vk_render_pass *pass = vulkan_begin_kfx_target_pass(
+		target->renderer, target->render_setup, target->framebuffer,
+		target->image, target->width, target->height, target,
+		&target->transitioned, &target->last_used_timeline_point);
+	if (pass == NULL) {
+		return NULL;
+	}
+	return &pass->base;
+}
+
+void kfx_vk_render_pass_set_dither(struct wlr_render_pass *wlr_pass, bool enable_dither) {
+	if (!vulkan_render_pass_is_vk(wlr_pass)) {
+		return;
+	}
+	struct wlr_vk_render_pass *pass = vulkan_get_render_pass(wlr_pass);
+	pass->kfx_dither = enable_dither;
+}
+
 void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 		const struct wlr_kfx_draw_options *options) {
 	if (!vulkan_render_pass_is_vk(wlr_pass)) {
@@ -638,9 +898,16 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 		return;
 	}
 	if (shader->layout.n_inputs > 0) {
-		wlr_log(WLR_ERROR, "wlr_kfx_target inputs are not implemented yet");
-		pass->failed = true;
-		return;
+		for (size_t i = 0; i < shader->layout.n_inputs; i++) {
+			struct wlr_kfx_target *in = options->inputs[i];
+			if (in == NULL || in->renderer != pass->renderer ||
+					!in->in_use || !in->transitioned ||
+					in == pass->kfx_target) {
+				wlr_log(WLR_ERROR, "Invalid wlr_kfx_target at input slot %zu", i);
+				pass->failed = true;
+				return;
+			}
+		}
 	}
 	if (options->params_len != shader->layout.params_size ||
 			(options->params_len > 0 && options->params == NULL)) {
@@ -664,6 +931,10 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 	if (options->clip != NULL) {
 		pixman_region32_init(&clip);
 		pixman_region32_copy(&clip, options->clip);
+	} else if (pass->kfx_target != NULL) {
+		int tw = 0, th = 0;
+		wlr_kfx_target_get_size(pass->kfx_target, &tw, &th);
+		pixman_region32_init_rect(&clip, 0, 0, tw, th);
 	} else {
 		struct wlr_buffer *buf = pass->render_buffer->wlr_buffer;
 		pixman_region32_init_rect(&clip, 0, 0, buf->width, buf->height);
@@ -700,6 +971,48 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 		return;
 	}
 
+	VkDescriptorSet sampler_ds = VK_NULL_HANDLE;
+	if (shader->layout.n_inputs == 1) {
+		sampler_ds = options->inputs[0]->ds_single;
+	} else if (shader->layout.n_inputs > 1) {
+		struct kfx_vk_temp_ds *temp = calloc(1, sizeof(*temp));
+		if (temp == NULL) {
+			pixman_region32_fini(&clip);
+			pass->failed = true;
+			return;
+		}
+		temp->pool = vulkan_alloc_texture_ds(pass->renderer,
+			pass->renderer->kfx->sampler_ds_layouts[shader->layout.n_inputs],
+			&temp->ds);
+		if (temp->pool == NULL) {
+			free(temp);
+			pixman_region32_fini(&clip);
+			pass->failed = true;
+			return;
+		}
+		VkDescriptorImageInfo img_infos[WLR_KFX_MAX_INPUTS];
+		VkWriteDescriptorSet writes[WLR_KFX_MAX_INPUTS];
+		for (size_t i = 0; i < shader->layout.n_inputs; i++) {
+			img_infos[i] = (VkDescriptorImageInfo){
+				.sampler = VK_NULL_HANDLE,
+				.imageView = options->inputs[i]->image_view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+			writes[i] = (VkWriteDescriptorSet){
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = temp->ds,
+				.dstBinding = (uint32_t)i,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &img_infos[i],
+			};
+		}
+		vkUpdateDescriptorSets(pass->renderer->dev->dev,
+			(uint32_t)shader->layout.n_inputs, writes, 0, NULL);
+		wl_list_insert(&pass->kfx_temp_ds, &temp->link);
+		sampler_ds = temp->ds;
+	}
+
 	struct kfx_vk_ubo_slab *slab = NULL;
 	uint32_t dyn_offset = 0;
 	if (shader->layout.params_size > 0) {
@@ -731,6 +1044,10 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 	vkCmdPushConstants(cb, shader->pipe_layout, VK_SHADER_STAGE_VERTEX_BIT,
 		0, sizeof(vert_pcr_data), &vert_pcr_data);
 
+	if (sampler_ds != VK_NULL_HANDLE) {
+		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			shader->pipe_layout, 0, 1, &sampler_ds, 0, NULL);
+	}
 	if (slab != NULL) {
 		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			shader->pipe_layout, 1, 1, &slab->ds, 1, &dyn_offset);
@@ -762,15 +1079,18 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 }
 
 void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass) {
-	if (wl_list_empty(&pass->kfx_ubo_slabs)) {
-		return;
+	if (!wl_list_empty(&pass->kfx_ubo_slabs)) {
+		wl_list_insert_list(&pass->command_buffer->kfx_ubo_slabs, &pass->kfx_ubo_slabs);
+		wl_list_init(&pass->kfx_ubo_slabs);
 	}
-	wl_list_insert_list(&pass->command_buffer->kfx_ubo_slabs, &pass->kfx_ubo_slabs);
-	wl_list_init(&pass->kfx_ubo_slabs);
+	if (!wl_list_empty(&pass->kfx_temp_ds)) {
+		wl_list_insert_list(&pass->command_buffer->kfx_temp_ds, &pass->kfx_temp_ds);
+		wl_list_init(&pass->kfx_temp_ds);
+	}
 }
 
 void kfx_vk_pass_cleanup(struct wlr_vk_render_pass *pass) {
-	if (wl_list_empty(&pass->kfx_ubo_slabs) || pass->renderer->kfx == NULL) {
+	if (pass->renderer->kfx == NULL) {
 		return;
 	}
 	struct kfx_vk_ubo_slab *slab, *tmp;
@@ -779,11 +1099,17 @@ void kfx_vk_pass_cleanup(struct wlr_vk_render_pass *pass) {
 		wl_list_remove(&slab->link);
 		wl_list_insert(&pass->renderer->kfx->slabs_free, &slab->link);
 	}
+	struct kfx_vk_temp_ds *temp, *temp_tmp;
+	wl_list_for_each_safe(temp, temp_tmp, &pass->kfx_temp_ds, link) {
+		wl_list_remove(&temp->link);
+		vulkan_free_ds(pass->renderer, temp->pool, temp->ds);
+		free(temp);
+	}
 }
 
 void kfx_vk_cb_release(struct wlr_vk_command_buffer *cb,
 		struct wlr_vk_renderer *renderer) {
-	if (wl_list_empty(&cb->kfx_ubo_slabs) || renderer->kfx == NULL) {
+	if (renderer->kfx == NULL) {
 		return;
 	}
 	struct kfx_vk_ubo_slab *slab, *tmp;
@@ -791,6 +1117,12 @@ void kfx_vk_cb_release(struct wlr_vk_command_buffer *cb,
 		slab->used = 0;
 		wl_list_remove(&slab->link);
 		wl_list_insert(&renderer->kfx->slabs_free, &slab->link);
+	}
+	struct kfx_vk_temp_ds *temp, *temp_tmp;
+	wl_list_for_each_safe(temp, temp_tmp, &cb->kfx_temp_ds, link) {
+		wl_list_remove(&temp->link);
+		vulkan_free_ds(renderer, temp->pool, temp->ds);
+		free(temp);
 	}
 }
 
@@ -801,6 +1133,11 @@ void kfx_vk_renderer_finish(struct wlr_vk_renderer *renderer) {
 	}
 
 	VkDevice dev = renderer->dev->dev;
+
+	struct wlr_kfx_target *target, *target_tmp;
+	wl_list_for_each_safe(target, target_tmp, &kfx->targets, link) {
+		kfx_target_destroy(target);
+	}
 
 	struct wlr_kfx_shader *shader, *shader_tmp;
 	wl_list_for_each_safe(shader, shader_tmp, &kfx->shaders, link) {

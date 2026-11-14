@@ -52,5 +52,13 @@ void wlr_kfx_render_pass_add_draw(struct wlr_render_pass *pass,
 struct wlr_render_pass *wlr_kfx_renderer_begin_buffer_pass(
 	struct wlr_renderer *renderer, struct wlr_buffer *buffer,
 	const struct wlr_buffer_pass_options *options, bool require_two_pass);
+void wlr_kfx_render_pass_set_dither(struct wlr_render_pass *pass, bool enable_dither);
+
+struct wlr_kfx_target *wlr_kfx_target_acquire(struct wlr_renderer *renderer,
+	int width, int height);
+void wlr_kfx_target_release(struct wlr_kfx_target *target);
+void wlr_kfx_target_get_size(struct wlr_kfx_target *target,
+	int *width, int *height);
+struct wlr_render_pass *wlr_kfx_target_begin_pass(struct wlr_kfx_target *target);
 
 #endif

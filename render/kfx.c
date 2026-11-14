@@ -68,3 +68,67 @@ struct wlr_render_pass *wlr_kfx_renderer_begin_buffer_pass(
 #endif
 	return wlr_renderer_begin_buffer_pass(renderer, buffer, options);
 }
+
+void wlr_kfx_render_pass_set_dither(struct wlr_render_pass *pass, bool enable_dither) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (pass != NULL) {
+		kfx_vk_render_pass_set_dither(pass, enable_dither);
+	}
+#else
+	(void)pass;
+	(void)enable_dither;
+#endif
+}
+
+struct wlr_kfx_target *wlr_kfx_target_acquire(struct wlr_renderer *renderer,
+		int width, int height) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (!wlr_kfx_is_supported(renderer)) {
+		return NULL;
+	}
+	return kfx_vk_target_acquire(renderer, width, height);
+#else
+	(void)renderer;
+	(void)width;
+	(void)height;
+	return NULL;
+#endif
+}
+
+void wlr_kfx_target_release(struct wlr_kfx_target *target) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (target != NULL) {
+		kfx_vk_target_release(target);
+	}
+#else
+	(void)target;
+#endif
+}
+
+void wlr_kfx_target_get_size(struct wlr_kfx_target *target,
+		int *width, int *height) {
+	if (width != NULL) {
+		*width = 0;
+	}
+	if (height != NULL) {
+		*height = 0;
+	}
+#if WLR_HAS_VULKAN_RENDERER
+	if (target != NULL) {
+		kfx_vk_target_get_size(target, width, height);
+	}
+#else
+	(void)target;
+#endif
+}
+
+struct wlr_render_pass *wlr_kfx_target_begin_pass(struct wlr_kfx_target *target) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (target != NULL) {
+		return kfx_vk_target_begin_pass(target);
+	}
+#else
+	(void)target;
+#endif
+	return NULL;
+}

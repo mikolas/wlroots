@@ -15,6 +15,7 @@ layout(push_constant, row_major) uniform UBO {
 } data;
 
 layout (constant_id = 0) const int OUTPUT_TRANSFORM = 0;
+layout (constant_id = 1) const int OUTPUT_DITHER = 0;
 
 // Matches enum wlr_vk_output_transform
 #define OUTPUT_TRANSFORM_IDENTITY 0
@@ -58,6 +59,22 @@ vec3 linear_color_to_bt1886(vec3 color) {
 	return pow(L / a, vec3(1.0 / 2.4)) - vec3(b);
 }
 
+float output_dither_lsb(vec2 frag_coord) {
+	const int rank_table[64] = int[64](
+		 0, 48, 12, 60,  3, 51, 15, 63,
+		32, 16, 44, 28, 35, 19, 47, 31,
+		 8, 56,  4, 52, 11, 59,  7, 55,
+		40, 24, 36, 20, 43, 27, 39, 23,
+		 2, 50, 14, 62,  1, 49, 13, 61,
+		34, 18, 46, 30, 33, 17, 45, 29,
+		10, 58,  6, 54,  9, 57,  5, 53,
+		42, 26, 38, 22, 41, 25, 37, 21
+	);
+	ivec2 p = ivec2(frag_coord) & 7;
+	int r = rank_table[p.y * 8 + p.x];
+	return ((float(r) + 0.5) / 64.0 - 0.5) / 255.0;
+}
+
 void main() {
 	vec4 in_color = subpassLoad(in_color).rgba;
 
@@ -88,6 +105,11 @@ void main() {
 		rgb = pow(rgb, vec3(1. / 2.2));
 	} else if (OUTPUT_TRANSFORM == OUTPUT_TRANSFORM_INVERSE_BT1886) {
 		rgb = linear_color_to_bt1886(rgb);
+	}
+
+	if (OUTPUT_DITHER != 0) {
+		float d = output_dither_lsb(gl_FragCoord.xy);
+		rgb = clamp(rgb + vec3(d), vec3(0.0), vec3(1.0));
 	}
 
 	// Back to pre-multiplied alpha

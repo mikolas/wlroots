@@ -7,6 +7,8 @@
 
 struct kfx_output_state {
 	struct wlr_addon addon;
+	bool require_two_pass;
+	bool dither;
 };
 
 static const int kfx_hook_addon_owner = 0;
@@ -82,34 +84,61 @@ struct wlr_kfx_node_hook *kfx_scene_node_get_hook(struct wlr_scene_node *node) {
 	return hook->active ? hook : NULL;
 }
 
-void wlr_kfx_output_set_two_pass(struct wlr_output *output, bool require_two_pass) {
+static struct kfx_output_state *kfx_output_get_or_create_state(
+		struct wlr_output *output, bool create) {
 	if (output == NULL) {
-		return;
+		return NULL;
 	}
 	struct wlr_addon *addon = wlr_addon_find(&output->addons,
 		&kfx_output_addon_owner, &kfx_output_addon_impl);
-	if (!require_two_pass) {
-		if (addon != NULL) {
-			kfx_output_addon_destroy(addon);
-		}
-		return;
-	}
 	if (addon != NULL) {
-		return;
+		struct kfx_output_state *state = wl_container_of(addon, state, addon);
+		return state;
 	}
-
+	if (!create) {
+		return NULL;
+	}
 	struct kfx_output_state *state = calloc(1, sizeof(*state));
 	if (state == NULL) {
-		return;
+		return NULL;
 	}
 	wlr_addon_init(&state->addon, &output->addons,
 		&kfx_output_addon_owner, &kfx_output_addon_impl);
+	return state;
+}
+
+static void kfx_output_cleanup_state_if_idle(struct kfx_output_state *state) {
+	if (state != NULL && !state->require_two_pass && !state->dither) {
+		kfx_output_addon_destroy(&state->addon);
+	}
+}
+
+void wlr_kfx_output_set_two_pass(struct wlr_output *output, bool require_two_pass) {
+	struct kfx_output_state *state =
+		kfx_output_get_or_create_state(output, require_two_pass);
+	if (state == NULL) {
+		return;
+	}
+	state->require_two_pass = require_two_pass;
+	kfx_output_cleanup_state_if_idle(state);
+}
+
+void wlr_kfx_output_set_dither(struct wlr_output *output, bool enable_dither) {
+	struct kfx_output_state *state =
+		kfx_output_get_or_create_state(output, enable_dither);
+	if (state == NULL) {
+		return;
+	}
+	state->dither = enable_dither;
+	kfx_output_cleanup_state_if_idle(state);
 }
 
 bool kfx_output_requires_two_pass(struct wlr_output *output) {
-	if (output == NULL) {
-		return false;
-	}
-	return wlr_addon_find(&output->addons,
-		&kfx_output_addon_owner, &kfx_output_addon_impl) != NULL;
+	struct kfx_output_state *state = kfx_output_get_or_create_state(output, false);
+	return state != NULL && (state->require_two_pass || state->dither);
+}
+
+bool kfx_output_get_dither(struct wlr_output *output) {
+	struct kfx_output_state *state = kfx_output_get_or_create_state(output, false);
+	return state != NULL && state->dither;
 }

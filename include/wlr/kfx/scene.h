@@ -14,6 +14,7 @@
 #include <wlr/util/addon.h>
 #include <wlr/util/box.h>
 
+struct wlr_kfx_target;
 struct wlr_output;
 struct wlr_render_pass;
 struct wlr_scene_node;
@@ -56,5 +57,15 @@ bool wlr_kfx_node_hook_init(struct wlr_kfx_node_hook *hook,
 void wlr_kfx_node_hook_finish(struct wlr_kfx_node_hook *hook);
 
 void wlr_kfx_output_set_two_pass(struct wlr_output *output, bool require_two_pass);
+void wlr_kfx_output_set_dither(struct wlr_output *output, bool enable_dither);
+
+bool wlr_kfx_scene_output_damage_intersects(struct wlr_scene_output *scene_output,
+	const struct wlr_box *box);
+void wlr_kfx_scene_output_damage_box(struct wlr_scene_output *scene_output,
+	const struct wlr_box *box);
+
+bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
+	struct wlr_scene_node *node, const struct wlr_box *box,
+	struct wlr_kfx_target *dst, int downscale, struct wlr_box *out_src_box);
 
 #endif

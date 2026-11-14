@@ -213,6 +213,13 @@ struct wlr_vk_render_format_setup {
 	VkPipeline output_pipe_gamma22;
 	VkPipeline output_pipe_bt1886;
 
+	VkPipeline output_pipe_dither_identity;
+	VkPipeline output_pipe_dither_srgb;
+	VkPipeline output_pipe_dither_pq;
+	VkPipeline output_pipe_dither_lut3d;
+	VkPipeline output_pipe_dither_gamma22;
+	VkPipeline output_pipe_dither_bt1886;
+
 	struct wlr_vk_renderer *renderer;
 	struct wl_list pipelines; // struct wlr_vk_pipeline.link
 };
@@ -288,6 +295,7 @@ struct wlr_vk_command_buffer {
 	struct wl_array wait_semaphores; // VkSemaphore
 
 	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
+	struct wl_list kfx_temp_ds;   // struct kfx_vk_temp_ds.link
 };
 
 #define VULKAN_COMMAND_BUFFERS_CAP 64
@@ -438,8 +446,24 @@ struct wlr_vk_render_pass {
 
 	struct wl_array textures; // struct wlr_vk_render_pass_texture
 
+	struct wlr_kfx_target *kfx_target;
+	VkImage kfx_target_image;
+	bool *kfx_target_transitioned;
+	uint64_t *kfx_target_timeline_point;
+	bool kfx_dither;
 	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
+	struct wl_list kfx_temp_ds;   // struct kfx_vk_temp_ds.link
 };
+
+struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
+	struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
+	bool use_blending_buffer, bool srgb);
+struct wlr_vk_render_pass *vulkan_begin_kfx_target_pass(
+	struct wlr_vk_renderer *renderer,
+	struct wlr_vk_render_format_setup *render_setup,
+	VkFramebuffer framebuffer, VkImage image, int width, int height,
+	struct wlr_kfx_target *target, bool *transitioned,
+	uint64_t *last_used_timeline_point);
 
 bool vulkan_render_pass_is_vk(struct wlr_render_pass *wlr_pass);
 struct wlr_vk_render_pass *vulkan_get_render_pass(struct wlr_render_pass *wlr_pass);

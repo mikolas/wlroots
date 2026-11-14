@@ -14,6 +14,7 @@ wlr_files += files(
 	'output/swapchain.c',
 	'scene/drag_icon.c',
 	'scene/kfx_hooks.c',
+	'scene/kfx_render_below.c',
 	'scene/subsurface_tree.c',
 	'scene/surface.c',
 	'scene/wlr_scene.c',

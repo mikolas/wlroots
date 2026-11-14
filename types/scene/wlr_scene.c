@@ -260,7 +260,7 @@ static bool scene_nodes_in_box(struct wlr_scene_node *node, struct wlr_box *box,
 	return _scene_nodes_in_box(node, box, iterator, user_data, x, y);
 }
 
-static void scene_node_opaque_region(struct wlr_scene_node *node, int x, int y,
+void scene_node_opaque_region(struct wlr_scene_node *node, int x, int y,
 		pixman_region32_t *opaque) {
 	int width, height;
 	scene_node_get_size(node, &width, &height);
@@ -370,7 +370,7 @@ static void transform_output_box(struct wlr_box *box, const struct render_data *
 	wlr_box_transform(box, box, transform, data->trans_width, data->trans_height);
 }
 
-static void scene_output_damage(struct wlr_scene_output *scene_output,
+void scene_output_damage(struct wlr_scene_output *scene_output,
 		const pixman_region32_t *damage) {
 	struct wlr_output *output = scene_output->output;
 
@@ -1189,7 +1189,7 @@ void wlr_scene_buffer_set_color_range(struct wlr_scene_buffer *scene_buffer,
 	scene_node_update(&scene_buffer->node, NULL);
 }
 
-static struct wlr_texture *scene_buffer_get_texture(
+struct wlr_texture *scene_buffer_get_texture(
 		struct wlr_scene_buffer *scene_buffer, struct wlr_renderer *renderer) {
 	if (scene_buffer->buffer == NULL || scene_buffer->texture != NULL) {
 		return scene_buffer->texture;
@@ -2567,6 +2567,9 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		wlr_buffer_unlock(buffer);
 		return false;
 	}
+	if (kfx_output_get_dither(output)) {
+		wlr_kfx_render_pass_set_dither(render_pass, true);
+	}
 
 	render_data.render_pass = render_pass;
 
@@ -2766,4 +2769,41 @@ void wlr_scene_output_for_each_buffer(struct wlr_scene_output *scene_output,
 		&box.width, &box.height);
 	scene_output_for_each_scene_buffer(&box, &scene_output->scene->tree.node, 0, 0,
 		iterator, user_data);
+}
+
+static void kfx_logical_box_to_output_buffer_region(
+		struct wlr_scene_output *scene_output, const struct wlr_box *box,
+		pixman_region32_t *out) {
+	pixman_region32_init_rect(out,
+		box->x - scene_output->x, box->y - scene_output->y,
+		box->width, box->height);
+	scale_region(out, scene_output->output->scale, true);
+	output_to_buffer_coords(out, scene_output->output);
+}
+
+bool wlr_kfx_scene_output_damage_intersects(struct wlr_scene_output *scene_output,
+		const struct wlr_box *box) {
+	if (scene_output == NULL || box == NULL || wlr_box_empty(box)) {
+		return false;
+	}
+	if (pixman_region32_empty(&scene_output->pending_commit_damage)) {
+		return false;
+	}
+	pixman_region32_t reg;
+	kfx_logical_box_to_output_buffer_region(scene_output, box, &reg);
+	pixman_region32_intersect(&reg, &reg, &scene_output->pending_commit_damage);
+	bool intersects = !pixman_region32_empty(&reg);
+	pixman_region32_fini(&reg);
+	return intersects;
+}
+
+void wlr_kfx_scene_output_damage_box(struct wlr_scene_output *scene_output,
+		const struct wlr_box *box) {
+	if (scene_output == NULL || box == NULL || wlr_box_empty(box)) {
+		return;
+	}
+	pixman_region32_t reg;
+	kfx_logical_box_to_output_buffer_region(scene_output, box, &reg);
+	scene_output_damage(scene_output, &reg);
+	pixman_region32_fini(&reg);
 }

@@ -178,6 +178,12 @@ static void destroy_render_format_setup(struct wlr_vk_renderer *renderer,
 	vkDestroyPipeline(dev, setup->output_pipe_lut3d, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_gamma22, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_bt1886, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_identity, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_srgb, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_pq, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_lut3d, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_gamma22, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_dither_bt1886, NULL);
 
 	struct wlr_vk_pipeline *pipeline, *tmp_pipeline;
 	wl_list_for_each_safe(pipeline, tmp_pipeline, &setup->pipelines, link) {
@@ -451,6 +457,7 @@ static bool init_command_buffer(struct wlr_vk_command_buffer *cb,
 	wl_list_init(&cb->destroy_textures);
 	wl_list_init(&cb->stage_buffers);
 	wl_list_init(&cb->kfx_ubo_slabs);
+	wl_list_init(&cb->kfx_temp_ds);
 	return true;
 }
 
@@ -1077,7 +1084,8 @@ bool vulkan_sync_render_pass_release(struct wlr_vk_renderer *renderer,
 			goto out;
 		}
 	} else {
-		if (!buffer_import_sync_file(pass->render_buffer->wlr_buffer, DMA_BUF_SYNC_WRITE, sync_file_fd)) {
+		if (pass->render_buffer != NULL && !buffer_import_sync_file(
+				pass->render_buffer->wlr_buffer, DMA_BUF_SYNC_WRITE, sync_file_fd)) {
 			goto out;
 		}
 
@@ -1166,6 +1174,8 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 		vk_color_transform_destroy(&color_transform->addon);
 	}
 
+	kfx_vk_renderer_finish(renderer);
+
 	struct wlr_vk_render_format_setup *setup, *tmp_setup;
 	wl_list_for_each_safe(setup, tmp_setup,
 			&renderer->render_format_setups, link) {
@@ -1186,8 +1196,6 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
 	vkDestroyShaderModule(dev->dev, renderer->tex_frag_module, NULL);
 	vkDestroyShaderModule(dev->dev, renderer->quad_frag_module, NULL);
 	vkDestroyShaderModule(dev->dev, renderer->output_module, NULL);
-
-	kfx_vk_renderer_finish(renderer);
 
 	struct wlr_vk_pipeline_layout *pipeline_layout, *pipeline_layout_tmp;
 	wl_list_for_each_safe(pipeline_layout, pipeline_layout_tmp,
@@ -1871,21 +1879,31 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 
 static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
-		enum wlr_vk_output_transform transform) {
+		enum wlr_vk_output_transform transform, bool dither) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
-	uint32_t output_transform_type = transform;
-	VkSpecializationMapEntry spec_entry = {
-		.constantID = 0,
-		.offset = 0,
-		.size = sizeof(uint32_t),
+	uint32_t spec_data[2] = {
+		(uint32_t)transform,
+		dither ? 1u : 0u,
+	};
+	VkSpecializationMapEntry spec_entries[2] = {
+		{
+			.constantID = 0,
+			.offset = 0,
+			.size = sizeof(uint32_t),
+		},
+		{
+			.constantID = 1,
+			.offset = sizeof(uint32_t),
+			.size = sizeof(uint32_t),
+		},
 	};
 	VkSpecializationInfo specialization = {
-		.mapEntryCount = 1,
-		.pMapEntries = &spec_entry,
-		.dataSize = sizeof(uint32_t),
-		.pData = &output_transform_type,
+		.mapEntryCount = 2,
+		.pMapEntries = spec_entries,
+		.dataSize = sizeof(spec_data),
+		.pData = spec_data,
 	};
 
 	VkPipelineShaderStageCreateInfo tex_stages[] = {
@@ -2400,32 +2418,62 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		// this is only well defined if render pass has a 2nd subpass
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY)) {
+				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY, false)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D)) {
+				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D, false)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB)) {
+				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB, false)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ)) {
+				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ, false)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22)) {
+				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22, false)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
-			renderer, setup->render_pass, renderer->output_pipe_layout,
-			&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886)) {
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886, false)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY, true)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D, true)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB, true)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ, true)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22, true)) {
+			goto error;
+		}
+		if (!init_blend_to_output_pipeline(
+				renderer, setup->render_pass, renderer->output_pipe_layout,
+				&setup->output_pipe_dither_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886, true)) {
 			goto error;
 		}
 	} else {
@@ -2530,6 +2578,12 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 error:
 	destroy_render_format_setup(renderer, setup);
 	return NULL;
+}
+
+struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
+		struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
+		bool use_blending_buffer, bool srgb) {
+	return find_or_create_render_setup(renderer, format, use_blending_buffer, srgb);
 }
 
 struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev) {
