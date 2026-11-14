@@ -48,6 +48,7 @@ Any break of the rules above is listed here with what breaks, why, the alternati
 | `kfx: render INSTEAD hooks in below-node pass, lazy 16x16 blue-noise dither, target pool eviction, and pass.c hook cleanup` | `kajo-only` | `local` | `include/render/vulkan.h`, `render/vulkan/pass.c`, `render/vulkan/renderer.c`, `render/vulkan/shaders/output.frag`, `types/scene/kfx_render_below.c`, `render/vulkan/kfx_draw.c` |
 | `kfx: add single-CB target chain submission and exact sampled-target timeline tracking` | `kajo-only` | `local` | `include/wlr/kfx/render.h`, `include/render/kfx.h`, `include/render/vulkan.h`, `render/kfx.c`, `render/vulkan/pass.c`, `render/vulkan/kfx_draw.c`, `render/vulkan/shaders/output.frag` |
 | `kfx: reject empty dst_box in target chain pre-flight and clarify blue-noise table provenance` | `kajo-only` | `local` | `render/vulkan/kfx_draw.c`, `render/vulkan/shaders/output.frag`, `FORK.md` |
+| `kfx: add deterministic gen_blue_noise.py generator for output.frag` | `kajo-only` | `local` | `render/vulkan/shaders/output.frag`, `FORK.md` |
 
 Status values: `local`, `submitted !<MR>`, `merged in <version>`, `dropped (<reason>)`. "Touches" lists modified upstream files; new files are not listed.
 
@@ -65,4 +66,4 @@ None yet.
 ## Licence
 
 wlroots is MIT-licensed (see `LICENSE`). Patches in this fork are MIT as well.
-The `blue_noise16[256]` permutation table in `render/vulkan/shaders/output.frag` is a 16x16 toroidal blue-noise rank table (0..255), provided as-is under the MIT licence.
+The `blue_noise16[256]` permutation table in `render/vulkan/shaders/output.frag` is generated deterministically by `render/vulkan/shaders/gen_blue_noise.py` (`sigma=1.5, seed=0x517cc1b727220a95`, MIT-licensed).
