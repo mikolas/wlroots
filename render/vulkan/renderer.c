@@ -1877,15 +1877,46 @@ struct wlr_vk_pipeline *setup_get_or_create_pipeline(
 	return pipeline;
 }
 
+static uint32_t vulkan_format_dither_quant(VkFormat format) {
+	switch (format) {
+	case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+	case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+		return 1023u;
+	case VK_FORMAT_R16G16B16_UNORM:
+	case VK_FORMAT_R16G16B16A16_UNORM:
+		return 65535u;
+	case VK_FORMAT_R5G6B5_UNORM_PACK16:
+	case VK_FORMAT_B5G6R5_UNORM_PACK16:
+	case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+	case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
+	case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+		return 31u;
+	case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+	case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+		return 15u;
+	case VK_FORMAT_R16_SFLOAT:
+	case VK_FORMAT_R16G16_SFLOAT:
+	case VK_FORMAT_R16G16B16_SFLOAT:
+	case VK_FORMAT_R16G16B16A16_SFLOAT:
+	case VK_FORMAT_R32_SFLOAT:
+	case VK_FORMAT_R32G32_SFLOAT:
+	case VK_FORMAT_R32G32B32_SFLOAT:
+	case VK_FORMAT_R32G32B32A32_SFLOAT:
+		return 0u;
+	default:
+		return 255u;
+	}
+}
+
 static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
-		enum wlr_vk_output_transform transform, bool dither) {
+		enum wlr_vk_output_transform transform, uint32_t dither_quant) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
 	uint32_t spec_data[2] = {
 		(uint32_t)transform,
-		dither ? 1u : 0u,
+		dither_quant,
 	};
 	VkSpecializationMapEntry spec_entries[2] = {
 		{
@@ -2418,62 +2449,32 @@ static struct wlr_vk_render_format_setup *find_or_create_render_setup(
 		// this is only well defined if render pass has a 2nd subpass
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY, false)) {
+				&setup->output_pipe_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY, 0u)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D, false)) {
+				&setup->output_pipe_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D, 0u)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB, false)) {
+				&setup->output_pipe_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB, 0u)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ, false)) {
+				&setup->output_pipe_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ, 0u)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22, false)) {
+				&setup->output_pipe_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22, 0u)) {
 			goto error;
 		}
 		if (!init_blend_to_output_pipeline(
 				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886, false)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_identity, WLR_VK_OUTPUT_TRANSFORM_IDENTITY, true)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_lut3d, WLR_VK_OUTPUT_TRANSFORM_LUT3D, true)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_srgb, WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB, true)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_pq, WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ, true)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_gamma22, WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22, true)) {
-			goto error;
-		}
-		if (!init_blend_to_output_pipeline(
-				renderer, setup->render_pass, renderer->output_pipe_layout,
-				&setup->output_pipe_dither_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886, true)) {
+				&setup->output_pipe_bt1886, WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886, 0u)) {
 			goto error;
 		}
 	} else {
@@ -2584,6 +2585,60 @@ struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
 		struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
 		bool use_blending_buffer, bool srgb) {
 	return find_or_create_render_setup(renderer, format, use_blending_buffer, srgb);
+}
+
+VkPipeline vulkan_setup_get_dither_output_pipeline(
+		struct wlr_vk_render_format_setup *setup, bool need_lut,
+		enum wlr_color_transfer_function tf) {
+	enum wlr_vk_output_transform transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22;
+	VkPipeline base_pipe = setup->output_pipe_gamma22;
+	VkPipeline *dither_slot = &setup->output_pipe_dither_gamma22;
+	if (need_lut) {
+		transform = WLR_VK_OUTPUT_TRANSFORM_LUT3D;
+		base_pipe = setup->output_pipe_lut3d;
+		dither_slot = &setup->output_pipe_dither_lut3d;
+	} else {
+		switch (tf) {
+		case WLR_COLOR_TRANSFER_FUNCTION_EXT_LINEAR:
+			transform = WLR_VK_OUTPUT_TRANSFORM_IDENTITY;
+			base_pipe = setup->output_pipe_identity;
+			dither_slot = &setup->output_pipe_dither_identity;
+			break;
+		case WLR_COLOR_TRANSFER_FUNCTION_SRGB:
+			transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_SRGB;
+			base_pipe = setup->output_pipe_srgb;
+			dither_slot = &setup->output_pipe_dither_srgb;
+			break;
+		case WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ:
+			transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_ST2084_PQ;
+			base_pipe = setup->output_pipe_pq;
+			dither_slot = &setup->output_pipe_dither_pq;
+			break;
+		case WLR_COLOR_TRANSFER_FUNCTION_GAMMA22:
+			transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22;
+			base_pipe = setup->output_pipe_gamma22;
+			dither_slot = &setup->output_pipe_dither_gamma22;
+			break;
+		case WLR_COLOR_TRANSFER_FUNCTION_BT1886:
+			transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_BT1886;
+			base_pipe = setup->output_pipe_bt1886;
+			dither_slot = &setup->output_pipe_dither_bt1886;
+			break;
+		}
+	}
+	uint32_t quant = setup->render_format != NULL ?
+		vulkan_format_dither_quant(setup->render_format->vk) : 0u;
+	if (quant == 0u) {
+		return base_pipe;
+	}
+	if (*dither_slot == VK_NULL_HANDLE) {
+		if (!init_blend_to_output_pipeline(setup->renderer, setup->render_pass,
+				setup->renderer->output_pipe_layout, dither_slot,
+				transform, quant)) {
+			return base_pipe;
+		}
+	}
+	return *dither_slot;
 }
 
 struct wlr_renderer *vulkan_renderer_create_for_device(struct wlr_vk_device *dev) {

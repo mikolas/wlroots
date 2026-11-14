@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <vulkan/vulkan.h>
 #include <wlr/kfx/render.h>
 #include <wlr/util/box.h>
@@ -17,6 +18,7 @@
 #define KFX_UBO_POOL_SETS 32
 #define KFX_TARGET_BUCKET_ALIGN 64
 #define KFX_TARGET_MAX_DIM 16384
+#define KFX_TARGET_IDLE_EVICT_MS 5000
 
 struct kfx_vk_ubo_pool {
 	struct wl_list link;
@@ -55,6 +57,7 @@ struct wlr_kfx_target {
 	bool transitioned;
 	bool in_use;
 	uint64_t last_used_timeline_point;
+	int64_t last_released_ms;
 };
 
 struct kfx_vk_pipeline_entry {
@@ -672,6 +675,34 @@ static void kfx_target_destroy(struct wlr_kfx_target *target) {
 	free(target);
 }
 
+static int64_t kfx_now_ms(void) {
+	struct timespec ts = {0};
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+}
+
+static void kfx_evict_idle_targets(struct wlr_vk_renderer *renderer,
+		struct kfx_vk_state *kfx, int64_t now_ms) {
+	if (kfx == NULL || wl_list_empty(&kfx->targets) ||
+			renderer->timeline_semaphore == VK_NULL_HANDLE) {
+		return;
+	}
+	uint64_t current_point = 0;
+	VkResult res = renderer->dev->api.vkGetSemaphoreCounterValueKHR(
+		renderer->dev->dev, renderer->timeline_semaphore, &current_point);
+	if (res != VK_SUCCESS) {
+		return;
+	}
+	struct wlr_kfx_target *cand, *tmp;
+	wl_list_for_each_safe(cand, tmp, &kfx->targets, link) {
+		if (!cand->in_use && cand->last_released_ms > 0 &&
+				(now_ms - cand->last_released_ms) >= KFX_TARGET_IDLE_EVICT_MS &&
+				cand->last_used_timeline_point <= current_point) {
+			kfx_target_destroy(cand);
+		}
+	}
+}
+
 struct wlr_kfx_target *kfx_vk_target_acquire(struct wlr_renderer *wlr_renderer,
 		int req_width, int req_height) {
 	if (wlr_renderer == NULL || req_width <= 0 || req_height <= 0 ||
@@ -687,14 +718,19 @@ struct wlr_kfx_target *kfx_vk_target_acquire(struct wlr_renderer *wlr_renderer,
 
 	int width = (req_width + KFX_TARGET_BUCKET_ALIGN - 1) & ~(KFX_TARGET_BUCKET_ALIGN - 1);
 	int height = (req_height + KFX_TARGET_BUCKET_ALIGN - 1) & ~(KFX_TARGET_BUCKET_ALIGN - 1);
+	int64_t now_ms = kfx_now_ms();
 
 	struct wlr_kfx_target *cand;
 	wl_list_for_each(cand, &kfx->targets, link) {
 		if (!cand->in_use && cand->width == width && cand->height == height) {
 			cand->in_use = true;
+			cand->last_released_ms = 0;
+			kfx_evict_idle_targets(renderer, kfx, now_ms);
 			return cand;
 		}
 	}
+
+	kfx_evict_idle_targets(renderer, kfx, now_ms);
 
 	const struct wlr_vk_format *fmt = vulkan_get_format_from_drm(DRM_FORMAT_ABGR16161616F);
 	if (fmt == NULL) {
@@ -842,6 +878,7 @@ void kfx_vk_target_release(struct wlr_kfx_target *target) {
 		return;
 	}
 	target->in_use = false;
+	target->last_released_ms = kfx_now_ms();
 }
 
 void kfx_vk_target_get_size(struct wlr_kfx_target *target,
@@ -861,13 +898,72 @@ struct wlr_render_pass *kfx_vk_target_begin_pass(struct wlr_kfx_target *target) 
 	if (target == NULL || !target->in_use) {
 		return NULL;
 	}
-	struct wlr_vk_render_pass *pass = vulkan_begin_kfx_target_pass(
-		target->renderer, target->render_setup, target->framebuffer,
-		target->image, target->width, target->height, target,
-		&target->transitioned, &target->last_used_timeline_point);
+	struct wlr_vk_renderer *renderer = target->renderer;
+	struct wlr_vk_render_pass *pass = calloc(1, sizeof(*pass));
 	if (pass == NULL) {
 		return NULL;
 	}
+
+	vulkan_render_pass_init(pass, renderer);
+	pass->two_pass = false;
+	pass->kfx_target = target;
+	pass->kfx_target_image = target->image;
+	pass->kfx_target_transitioned = &target->transitioned;
+	pass->kfx_target_timeline_point = &target->last_used_timeline_point;
+
+	struct wlr_vk_command_buffer *cb = vulkan_acquire_command_buffer(renderer);
+	if (cb == NULL) {
+		rect_union_finish(&pass->updated_region);
+		free(pass);
+		return NULL;
+	}
+
+	VkCommandBufferBeginInfo begin_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+	};
+	VkResult res = vkBeginCommandBuffer(cb->vk, &begin_info);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkBeginCommandBuffer", res);
+		vulkan_reset_command_buffer(cb);
+		rect_union_finish(&pass->updated_region);
+		free(pass);
+		return NULL;
+	}
+
+	vulkan_change_layout(cb->vk, target->image,
+		target->transitioned ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		target->transitioned ? VK_ACCESS_SHADER_READ_BIT : 0,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
+	VkRect2D rect = {
+		.extent = {
+			.width = (uint32_t)target->width,
+			.height = (uint32_t)target->height,
+		},
+	};
+	VkRenderPassBeginInfo rp_info = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderArea = rect,
+		.clearValueCount = 0,
+		.renderPass = target->render_setup->render_pass,
+		.framebuffer = target->framebuffer,
+	};
+	vkCmdBeginRenderPass(cb->vk, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+	vkCmdSetViewport(cb->vk, 0, 1, &(VkViewport){
+		.width = (float)target->width,
+		.height = (float)target->height,
+		.maxDepth = 1.0f,
+	});
+
+	matrix_projection(pass->projection, target->width, target->height,
+		WL_OUTPUT_TRANSFORM_FLIPPED_180);
+
+	pass->render_setup = target->render_setup;
+	pass->command_buffer = cb;
 	return &pass->base;
 }
 
@@ -906,6 +1002,10 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 				wlr_log(WLR_ERROR, "Invalid wlr_kfx_target at input slot %zu", i);
 				pass->failed = true;
 				return;
+			}
+			uint64_t min_point = pass->renderer->timeline_point + 2;
+			if (in->last_used_timeline_point < min_point) {
+				in->last_used_timeline_point = min_point;
 			}
 		}
 	}
@@ -1086,6 +1186,9 @@ void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass) {
 	if (!wl_list_empty(&pass->kfx_temp_ds)) {
 		wl_list_insert_list(&pass->command_buffer->kfx_temp_ds, &pass->kfx_temp_ds);
 		wl_list_init(&pass->kfx_temp_ds);
+	}
+	if (pass->renderer->kfx != NULL && !wl_list_empty(&pass->renderer->kfx->targets)) {
+		kfx_evict_idle_targets(pass->renderer, pass->renderer->kfx, kfx_now_ms());
 	}
 }
 

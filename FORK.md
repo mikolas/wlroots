@@ -45,8 +45,16 @@ Any break of the rules above is listed here with what breaks, why, the alternati
 | `kfx: add scene leaf-node render hooks (X4) and two-pass pathway tracking (X6)` | `kajo-only` | `local` | `include/types/wlr_scene.h`, `types/meson.build`, `types/scene/wlr_scene.c` |
 | `scene: unlink color_manager_v1_destroy listener on scene destroy` | `upstreamable` | `local` | `types/scene/wlr_scene.c` |
 | `kfx: add pooled offscreen targets (X3), below-node scene render (X2), damage helpers (X5), and output dither (X6)` | `kajo-only` | `local` | `include/render/vulkan.h`, `include/types/wlr_scene.h`, `render/vulkan/pass.c`, `render/vulkan/renderer.c`, `render/vulkan/shaders/output.frag`, `types/meson.build`, `types/scene/wlr_scene.c` |
+| `kfx: render INSTEAD hooks in below-node pass, lazy 16x16 blue-noise dither, target pool eviction, and pass.c hook cleanup` | `kajo-only` | `local` | `include/render/vulkan.h`, `render/vulkan/pass.c`, `render/vulkan/renderer.c`, `render/vulkan/shaders/output.frag`, `types/scene/kfx_render_below.c`, `render/vulkan/kfx_draw.c` |
 
 Status values: `local`, `submitted !<MR>`, `merged in <version>`, `dropped (<reason>)`. "Touches" lists modified upstream files; new files are not listed.
+
+## Upstream file touchpoint notes
+
+- **`render/vulkan/pass.c`**: Keeps upstream indentation intact. Three small hooks connect `kfx_draw.c`:
+  1. `if (pass->kfx_dither)` before `if (need_lut)` in `setup_get_output_pipe()` delegates dither pipeline lookup/creation to `vulkan_setup_get_dither_output_pipeline()`.
+  2. `if (render_buffer == NULL) { goto skip_render_buffer; }` around the swapchain/buffer barrier block in `render_pass_submit()` when submitting a pooled `wlr_kfx_target` pass (whose image layout transition is handled after `vkEndCommandBuffer`), plus `kfx_vk_target_on_pass_submit()` / `kfx_vk_pass_release_sampled_targets()` calls.
+  3. `vulkan_render_pass_init()` exports the base `wlr_render_pass_init(&pass->base, &render_pass_impl)` call so `kfx_vk_target_begin_pass()` lives in `render/vulkan/kfx_draw.c`.
 
 ## Notes from the last base move
 

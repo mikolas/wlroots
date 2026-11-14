@@ -25,6 +25,15 @@ struct wlr_vk_render_pass *vulkan_get_render_pass(struct wlr_render_pass *wlr_pa
 	return pass;
 }
 
+void vulkan_render_pass_init(struct wlr_vk_render_pass *pass,
+		struct wlr_vk_renderer *renderer) {
+	wlr_render_pass_init(&pass->base, &render_pass_impl);
+	wl_list_init(&pass->kfx_ubo_slabs);
+	wl_list_init(&pass->kfx_temp_ds);
+	pass->renderer = renderer;
+	rect_union_init(&pass->updated_region);
+}
+
 static struct wlr_vk_render_pass *get_render_pass(struct wlr_render_pass *wlr_pass) {
 	return vulkan_get_render_pass(wlr_pass);
 }
@@ -299,33 +308,30 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		encode_color_matrix(matrix, frag_pcr_data.matrix);
 
 		VkPipeline pipeline = VK_NULL_HANDLE;
-		struct wlr_vk_render_format_setup *setup = render_buffer->two_pass.render_setup;
 		if (need_lut) {
-			pipeline = pass->kfx_dither ?
-				setup->output_pipe_dither_lut3d : setup->output_pipe_lut3d;
+			pipeline = render_buffer->two_pass.render_setup->output_pipe_lut3d;
 		} else {
 			switch (tf) {
 			case WLR_COLOR_TRANSFER_FUNCTION_EXT_LINEAR:
-				pipeline = pass->kfx_dither ?
-					setup->output_pipe_dither_identity : setup->output_pipe_identity;
+				pipeline = render_buffer->two_pass.render_setup->output_pipe_identity;
 				break;
 			case WLR_COLOR_TRANSFER_FUNCTION_SRGB:
-				pipeline = pass->kfx_dither ?
-					setup->output_pipe_dither_srgb : setup->output_pipe_srgb;
+				pipeline = render_buffer->two_pass.render_setup->output_pipe_srgb;
 				break;
 			case WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ:
-				pipeline = pass->kfx_dither ?
-					setup->output_pipe_dither_pq : setup->output_pipe_pq;
+				pipeline = render_buffer->two_pass.render_setup->output_pipe_pq;
 				break;
 			case WLR_COLOR_TRANSFER_FUNCTION_GAMMA22:
-				pipeline = pass->kfx_dither ?
-					setup->output_pipe_dither_gamma22 : setup->output_pipe_gamma22;
+				pipeline = render_buffer->two_pass.render_setup->output_pipe_gamma22;
 				break;
 			case WLR_COLOR_TRANSFER_FUNCTION_BT1886:
-				pipeline = pass->kfx_dither ?
-					setup->output_pipe_dither_bt1886 : setup->output_pipe_bt1886;
+				pipeline = render_buffer->two_pass.render_setup->output_pipe_bt1886;
 				break;
 			}
+		}
+		if (pass->kfx_dither) {
+			pipeline = vulkan_setup_get_dither_output_pipeline(
+				render_buffer->two_pass.render_setup, need_lut, tf);
 		}
 		bind_pipeline(pass, pipeline);
 		vkCmdPushConstants(render_cb->vk, renderer->output_pipe_layout,
@@ -482,82 +488,86 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		}
 	}
 
-	if (render_buffer != NULL) {
-		if (!render_pass_wait_render_buffer(pass, render_wait, &render_wait_len)) {
-			wlr_log(WLR_ERROR, "Failed to wait for render buffer DMA-BUF fence");
-		}
-
-		// also add acquire/release barriers for the current render buffer
-		VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
-		if (!pass->render_buffer_out->transitioned) {
-			src_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-			pass->render_buffer_out->transitioned = true;
-		}
-
-		if (pass->two_pass) {
-			// The render pass changes the blend image layout from
-			// color attachment to read only, so on each frame, before
-			// the render pass starts, we change it back
-			VkImageLayout blend_src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			if (!render_buffer->two_pass.blend_transitioned) {
-				blend_src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-				render_buffer->two_pass.blend_transitioned = true;
-			}
-
-			VkImageMemoryBarrier blend_acq_barrier = {
-				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-				.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-				.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-				.image = render_buffer->two_pass.blend_image,
-				.oldLayout = blend_src_layout,
-				.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-				.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-				.subresourceRange = {
-					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-					.layerCount = 1,
-					.levelCount = 1,
-				},
-			};
-			vkCmdPipelineBarrier(stage_cb->vk, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				0, 0, NULL, 0, NULL, 1, &blend_acq_barrier);
-		}
-
-		// acquire render buffer before rendering
-		acquire_barriers[idx] = (VkImageMemoryBarrier){
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-			.dstQueueFamilyIndex = renderer->dev->queue_family,
-			.image = render_buffer->image,
-			.oldLayout = src_layout,
-			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
-			.srcAccessMask = 0, // ignored anyways
-			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.subresourceRange.layerCount = 1,
-			.subresourceRange.levelCount = 1,
-		};
-
-		// release render buffer after rendering
-		release_barriers[idx] = (VkImageMemoryBarrier){
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.srcQueueFamilyIndex = renderer->dev->queue_family,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-			.image = render_buffer->image,
-			.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
-			.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-			.dstAccessMask = 0, // ignored anyways
-			.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.subresourceRange.layerCount = 1,
-			.subresourceRange.levelCount = 1,
-		};
-
-		++idx;
+	if (render_buffer == NULL) {
+		goto skip_render_buffer;
 	}
+
+	if (!render_pass_wait_render_buffer(pass, render_wait, &render_wait_len)) {
+		wlr_log(WLR_ERROR, "Failed to wait for render buffer DMA-BUF fence");
+	}
+
+	// also add acquire/release barriers for the current render buffer
+	VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
+	if (!pass->render_buffer_out->transitioned) {
+		src_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+		pass->render_buffer_out->transitioned = true;
+	}
+
+	if (pass->two_pass) {
+		// The render pass changes the blend image layout from
+		// color attachment to read only, so on each frame, before
+		// the render pass starts, we change it back
+		VkImageLayout blend_src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		if (!render_buffer->two_pass.blend_transitioned) {
+			blend_src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+			render_buffer->two_pass.blend_transitioned = true;
+		}
+
+		VkImageMemoryBarrier blend_acq_barrier = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = render_buffer->two_pass.blend_image,
+			.oldLayout = blend_src_layout,
+			.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			.subresourceRange = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.layerCount = 1,
+				.levelCount = 1,
+			},
+		};
+		vkCmdPipelineBarrier(stage_cb->vk, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			0, 0, NULL, 0, NULL, 1, &blend_acq_barrier);
+	}
+
+	// acquire render buffer before rendering
+	acquire_barriers[idx] = (VkImageMemoryBarrier){
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+		.dstQueueFamilyIndex = renderer->dev->queue_family,
+		.image = render_buffer->image,
+		.oldLayout = src_layout,
+		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.srcAccessMask = 0, // ignored anyways
+		.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		.subresourceRange.layerCount = 1,
+		.subresourceRange.levelCount = 1,
+	};
+
+	// release render buffer after rendering
+	release_barriers[idx] = (VkImageMemoryBarrier){
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		.srcQueueFamilyIndex = renderer->dev->queue_family,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+		.image = render_buffer->image,
+		.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstAccessMask = 0, // ignored anyways
+		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		.subresourceRange.layerCount = 1,
+		.subresourceRange.levelCount = 1,
+	};
+
+	++idx;
+
+skip_render_buffer:
 
 	if (idx > 0) {
 		vkCmdPipelineBarrier(stage_cb->vk, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -1427,81 +1437,6 @@ struct wlr_vk_render_pass *vulkan_begin_render_pass_with_flags(struct wlr_vk_ren
 	wlr_buffer_lock(buffer->wlr_buffer);
 	pass->render_buffer = buffer;
 	pass->render_buffer_out = buffer_out;
-	pass->render_setup = render_setup;
-	pass->command_buffer = cb;
-	return pass;
-}
-
-struct wlr_vk_render_pass *vulkan_begin_kfx_target_pass(
-		struct wlr_vk_renderer *renderer,
-		struct wlr_vk_render_format_setup *render_setup,
-		VkFramebuffer framebuffer, VkImage image, int width, int height,
-		struct wlr_kfx_target *target, bool *transitioned,
-		uint64_t *last_used_timeline_point) {
-	struct wlr_vk_render_pass *pass = calloc(1, sizeof(*pass));
-	if (pass == NULL) {
-		return NULL;
-	}
-
-	wlr_render_pass_init(&pass->base, &render_pass_impl);
-	wl_list_init(&pass->kfx_ubo_slabs);
-	wl_list_init(&pass->kfx_temp_ds);
-	pass->renderer = renderer;
-	pass->two_pass = false;
-	pass->kfx_target = target;
-	pass->kfx_target_image = image;
-	pass->kfx_target_transitioned = transitioned;
-	pass->kfx_target_timeline_point = last_used_timeline_point;
-	rect_union_init(&pass->updated_region);
-
-	struct wlr_vk_command_buffer *cb = vulkan_acquire_command_buffer(renderer);
-	if (cb == NULL) {
-		rect_union_finish(&pass->updated_region);
-		free(pass);
-		return NULL;
-	}
-
-	VkCommandBufferBeginInfo begin_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-	};
-	VkResult res = vkBeginCommandBuffer(cb->vk, &begin_info);
-	if (res != VK_SUCCESS) {
-		wlr_vk_error("vkBeginCommandBuffer", res);
-		vulkan_reset_command_buffer(cb);
-		rect_union_finish(&pass->updated_region);
-		free(pass);
-		return NULL;
-	}
-
-	bool was_transitioned = transitioned != NULL && *transitioned;
-	vulkan_change_layout(cb->vk, image,
-		was_transitioned ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-		was_transitioned ? VK_ACCESS_SHADER_READ_BIT : 0,
-		VK_IMAGE_LAYOUT_GENERAL,
-		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-
-	VkRect2D rect = {
-		.extent = { .width = (uint32_t)width, .height = (uint32_t)height },
-	};
-	VkRenderPassBeginInfo rp_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-		.renderArea = rect,
-		.clearValueCount = 0,
-		.renderPass = render_setup->render_pass,
-		.framebuffer = framebuffer,
-	};
-	vkCmdBeginRenderPass(cb->vk, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
-
-	vkCmdSetViewport(cb->vk, 0, 1, &(VkViewport){
-		.width = (float)width,
-		.height = (float)height,
-		.maxDepth = 1.0f,
-	});
-
-	matrix_projection(pass->projection, width, height, WL_OUTPUT_TRANSFORM_FLIPPED_180);
-
 	pass->render_setup = render_setup;
 	pass->command_buffer = cb;
 	return pass;

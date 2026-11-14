@@ -458,12 +458,11 @@ struct wlr_vk_render_pass {
 struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
 	struct wlr_vk_renderer *renderer, const struct wlr_vk_format *format,
 	bool use_blending_buffer, bool srgb);
-struct wlr_vk_render_pass *vulkan_begin_kfx_target_pass(
-	struct wlr_vk_renderer *renderer,
-	struct wlr_vk_render_format_setup *render_setup,
-	VkFramebuffer framebuffer, VkImage image, int width, int height,
-	struct wlr_kfx_target *target, bool *transitioned,
-	uint64_t *last_used_timeline_point);
+VkPipeline vulkan_setup_get_dither_output_pipeline(
+	struct wlr_vk_render_format_setup *setup, bool need_lut,
+	enum wlr_color_transfer_function tf);
+void vulkan_render_pass_init(struct wlr_vk_render_pass *pass,
+	struct wlr_vk_renderer *renderer);
 
 bool vulkan_render_pass_is_vk(struct wlr_render_pass *wlr_pass);
 struct wlr_vk_render_pass *vulkan_get_render_pass(struct wlr_render_pass *wlr_pass);

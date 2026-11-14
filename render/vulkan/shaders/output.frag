@@ -15,7 +15,7 @@ layout(push_constant, row_major) uniform UBO {
 } data;
 
 layout (constant_id = 0) const int OUTPUT_TRANSFORM = 0;
-layout (constant_id = 1) const int OUTPUT_DITHER = 0;
+layout (constant_id = 1) const int OUTPUT_DITHER_QUANT = 0;
 
 // Matches enum wlr_vk_output_transform
 #define OUTPUT_TRANSFORM_IDENTITY 0
@@ -59,20 +59,29 @@ vec3 linear_color_to_bt1886(vec3 color) {
 	return pow(L / a, vec3(1.0 / 2.4)) - vec3(b);
 }
 
-float output_dither_lsb(vec2 frag_coord) {
-	const int rank_table[64] = int[64](
-		 0, 48, 12, 60,  3, 51, 15, 63,
-		32, 16, 44, 28, 35, 19, 47, 31,
-		 8, 56,  4, 52, 11, 59,  7, 55,
-		40, 24, 36, 20, 43, 27, 39, 23,
-		 2, 50, 14, 62,  1, 49, 13, 61,
-		34, 18, 46, 30, 33, 17, 45, 29,
-		10, 58,  6, 54,  9, 57,  5, 53,
-		42, 26, 38, 22, 41, 25, 37, 21
+// Ulichney (1993) 16x16 toroidal void-and-cluster blue-noise rank table (0..255)
+float output_dither_blue_noise(vec2 frag_coord) {
+	const int blue_noise16[256] = int[256](
+		233, 108, 142,  79,  13, 185,  70, 208, 130, 245, 158,  30,  56, 253,  81, 194,
+		 10, 173,  37, 205, 231, 124,  33, 156,  16,  77, 195, 222, 143, 172,  23, 118,
+		 58, 246,  93, 161,  54,  91, 225, 198, 104,  49, 119,   0,  73, 102, 223, 155,
+		186, 122,  26, 133, 189,   3, 145,  60, 250, 171, 214, 152, 244,  39, 199,  87,
+		 43, 226, 201,  67, 241, 112, 178,  38, 136,  95,  25,  83, 175, 126,  19, 140,
+		 76,   8, 107, 169,  20, 215,  74, 232,   9, 191, 236,  47, 206,  66, 239, 217,
+		177, 148, 255,  86,  46, 150,  97, 128, 162,  69, 117, 146, 106,   6, 160, 113,
+		 55, 211,  27, 135, 234, 188,  17, 203,  44, 224, 174,  29, 252, 184,  84,  34,
+		127,  98, 192,  65, 116, 167,  59, 249, 103,  21, 209,  92,  52, 134, 202, 228,
+		 11, 238, 165,   4, 219,  36,  90, 137, 154,  75, 129, 159, 221,  24,  68, 157,
+		182,  40,  80, 144, 101, 200, 235,  12, 196, 227,   1,  62, 190, 120, 247,  94,
+		218, 114, 204, 248,  48, 132,  72, 170,  53, 111, 180, 242, 100,  14, 149,  51,
+		139,  22,  61, 163,  15, 181, 115,  28, 254,  85,  35, 141,  45, 213, 176,  78,
+		243, 197, 123,  89, 212, 229,  82, 193, 153, 125, 210, 164,  71, 105, 230,  32,
+		 96,   2, 183, 151,  31,  57, 138,   5, 220,  63,  18, 237, 187,   7, 121, 168,
+		 64, 216,  50, 251, 110, 166, 240,  99,  42, 179, 109,  88, 131, 207,  41, 147
 	);
-	ivec2 p = ivec2(frag_coord) & 7;
-	int r = rank_table[p.y * 8 + p.x];
-	return ((float(r) + 0.5) / 64.0 - 0.5) / 255.0;
+	ivec2 p = ivec2(frag_coord) & 15;
+	int r = blue_noise16[p.y * 16 + p.x];
+	return (float(r) + 0.5) / 256.0 - 0.5;
 }
 
 void main() {
@@ -107,8 +116,8 @@ void main() {
 		rgb = linear_color_to_bt1886(rgb);
 	}
 
-	if (OUTPUT_DITHER != 0) {
-		float d = output_dither_lsb(gl_FragCoord.xy);
+	if (OUTPUT_DITHER_QUANT > 0) {
+		float d = output_dither_blue_noise(gl_FragCoord.xy) / float(OUTPUT_DITHER_QUANT);
 		rgb = clamp(rgb + vec3(d), vec3(0.0), vec3(1.0));
 	}
 

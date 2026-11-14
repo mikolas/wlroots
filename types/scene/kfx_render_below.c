@@ -91,10 +91,8 @@ static void kfx_collect_leaves_below(struct wlr_scene_node *node,
 	}
 
 	struct wlr_kfx_node_hook *hook = kfx_scene_node_get_hook(node);
-	if (hook != NULL && hook->stage == WLR_KFX_INSTEAD) {
-		return;
-	}
-	if (kfx_scene_node_invisible(node)) {
+	if ((hook == NULL || hook->stage != WLR_KFX_INSTEAD) &&
+			kfx_scene_node_invisible(node)) {
 		return;
 	}
 
@@ -155,8 +153,8 @@ bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
 	struct wlr_box output_logical = {
 		.x = scene_output->x,
 		.y = scene_output->y,
-		.width = (int)(trans_width / scale),
-		.height = (int)(trans_height / scale),
+		.width = (int)ceil((double)trans_width / (double)scale),
+		.height = (int)ceil((double)trans_height / (double)scale),
 	};
 
 	struct wlr_box clamped_logical;
@@ -174,6 +172,23 @@ bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
 		.height = clamped_logical.height,
 	};
 	kfx_scale_box(&buf_box, scale);
+	if (buf_box.x < 0) {
+		buf_box.width += buf_box.x;
+		buf_box.x = 0;
+	}
+	if (buf_box.y < 0) {
+		buf_box.height += buf_box.y;
+		buf_box.y = 0;
+	}
+	if (buf_box.x + buf_box.width > trans_width) {
+		buf_box.width = trans_width - buf_box.x;
+	}
+	if (buf_box.y + buf_box.height > trans_height) {
+		buf_box.height = trans_height - buf_box.y;
+	}
+	if (buf_box.width <= 0 || buf_box.height <= 0) {
+		return false;
+	}
 	wlr_box_transform(&buf_box, &buf_box, inv_transform, trans_width, trans_height);
 
 	int x0 = (buf_box.x / downscale) * downscale;
@@ -232,7 +247,8 @@ bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
 		struct kfx_below_leaf *leaf = &ctx.leaves[i];
 		pixman_region32_intersect_rect(&leaf->visible, &remaining,
 			leaf->box.x, leaf->box.y, leaf->box.width, leaf->box.height);
-		if (calc_vis) {
+		struct wlr_kfx_node_hook *hook = kfx_scene_node_get_hook(leaf->node);
+		if (calc_vis && (hook == NULL || hook->stage != WLR_KFX_INSTEAD)) {
 			scene_node_opaque_region(leaf->node, leaf->x, leaf->y, &leaf->opaque);
 			pixman_region32_subtract(&remaining, &remaining, &leaf->opaque);
 		}
@@ -308,6 +324,25 @@ bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
 			inv_transform, trans_w_ds, trans_h_ds);
 		pixman_region32_translate(&opaque, -t0_x, -t0_y);
 		pixman_region32_subtract(&opaque, &render_region, &opaque);
+
+		struct wlr_kfx_node_hook *kfx_hook = kfx_scene_node_get_hook(leaf->node);
+		struct wlr_kfx_render_ctx kfx_ctx = {
+			.render_pass = pass,
+			.dst_box = dst_box,
+			.clip = &render_region,
+			.output = scene_output,
+		};
+		if (kfx_hook != NULL && kfx_hook->impl != NULL &&
+				kfx_hook->impl->render != NULL &&
+				kfx_hook->stage == WLR_KFX_BEFORE) {
+			kfx_hook->impl->render(kfx_hook, WLR_KFX_BEFORE, &kfx_ctx);
+		}
+		if (kfx_hook != NULL && kfx_hook->impl != NULL &&
+				kfx_hook->impl->render != NULL &&
+				kfx_hook->stage == WLR_KFX_INSTEAD) {
+			kfx_hook->impl->render(kfx_hook, WLR_KFX_INSTEAD, &kfx_ctx);
+			goto leaf_done;
+		}
 
 		switch (leaf->node->type) {
 		case WLR_SCENE_NODE_TREE:
@@ -388,6 +423,13 @@ bool wlr_kfx_scene_output_render_below(struct wlr_scene_output *scene_output,
 			break;
 		}
 
+		if (kfx_hook != NULL && kfx_hook->impl != NULL &&
+				kfx_hook->impl->render != NULL &&
+				kfx_hook->stage == WLR_KFX_AFTER) {
+			kfx_hook->impl->render(kfx_hook, WLR_KFX_AFTER, &kfx_ctx);
+		}
+
+leaf_done:
 		pixman_region32_fini(&opaque);
 		pixman_region32_fini(&render_region);
 	}
