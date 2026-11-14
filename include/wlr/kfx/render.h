@@ -61,4 +61,12 @@ void wlr_kfx_target_get_size(struct wlr_kfx_target *target,
 	int *width, int *height);
 struct wlr_render_pass *wlr_kfx_target_begin_pass(struct wlr_kfx_target *target);
 
+struct wlr_kfx_target_draw_step {
+	struct wlr_kfx_target *dst;
+	struct wlr_kfx_draw_options draw;
+};
+
+bool wlr_kfx_renderer_run_target_chain(struct wlr_renderer *renderer,
+	const struct wlr_kfx_target_draw_step *steps, size_t n_steps);
+
 #endif

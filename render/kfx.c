@@ -132,3 +132,18 @@ struct wlr_render_pass *wlr_kfx_target_begin_pass(struct wlr_kfx_target *target)
 #endif
 	return NULL;
 }
+
+bool wlr_kfx_renderer_run_target_chain(struct wlr_renderer *renderer,
+		const struct wlr_kfx_target_draw_step *steps, size_t n_steps) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (!wlr_kfx_is_supported(renderer)) {
+		return false;
+	}
+	return kfx_vk_renderer_run_target_chain(renderer, steps, n_steps);
+#else
+	(void)renderer;
+	(void)steps;
+	(void)n_steps;
+	return false;
+#endif
+}

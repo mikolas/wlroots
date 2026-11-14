@@ -383,15 +383,15 @@ error:
 	return NULL;
 }
 
-static bool ubo_alloc_slot(struct wlr_vk_render_pass *pass,
+static bool ubo_alloc_slot(struct wlr_vk_renderer *renderer,
+		struct wl_list *slab_list,
 		const void *params, size_t params_len,
 		struct kfx_vk_ubo_slab **out_slab, uint32_t *out_offset) {
-	struct wlr_vk_renderer *renderer = pass->renderer;
 	struct kfx_vk_state *kfx = renderer->kfx;
 
 	struct kfx_vk_ubo_slab *slab = NULL;
 	struct kfx_vk_ubo_slab *cand;
-	wl_list_for_each(cand, &pass->kfx_ubo_slabs, link) {
+	wl_list_for_each(cand, slab_list, link) {
 		if (cand->used + kfx->ubo_step <= cand->size) {
 			slab = cand;
 			break;
@@ -402,7 +402,7 @@ static bool ubo_alloc_slot(struct wlr_vk_render_pass *pass,
 		slab = wl_container_of(kfx->slabs_free.next, slab, link);
 		wl_list_remove(&slab->link);
 		slab->used = 0;
-		wl_list_insert(&pass->kfx_ubo_slabs, &slab->link);
+		wl_list_insert(slab_list, &slab->link);
 	}
 
 	if (slab == NULL) {
@@ -410,7 +410,7 @@ static bool ubo_alloc_slot(struct wlr_vk_render_pass *pass,
 		if (slab == NULL) {
 			return false;
 		}
-		wl_list_insert(&pass->kfx_ubo_slabs, &slab->link);
+		wl_list_insert(slab_list, &slab->link);
 	}
 
 	VkDeviceSize offset = slab->used;
@@ -909,10 +909,10 @@ struct wlr_render_pass *kfx_vk_target_begin_pass(struct wlr_kfx_target *target) 
 	pass->kfx_target = target;
 	pass->kfx_target_image = target->image;
 	pass->kfx_target_transitioned = &target->transitioned;
-	pass->kfx_target_timeline_point = &target->last_used_timeline_point;
 
 	struct wlr_vk_command_buffer *cb = vulkan_acquire_command_buffer(renderer);
 	if (cb == NULL) {
+		wl_array_release(&pass->kfx_sampled_targets);
 		rect_union_finish(&pass->updated_region);
 		free(pass);
 		return NULL;
@@ -925,6 +925,7 @@ struct wlr_render_pass *kfx_vk_target_begin_pass(struct wlr_kfx_target *target) 
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkBeginCommandBuffer", res);
 		vulkan_reset_command_buffer(cb);
+		wl_array_release(&pass->kfx_sampled_targets);
 		rect_union_finish(&pass->updated_region);
 		free(pass);
 		return NULL;
@@ -1003,9 +1004,22 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 				pass->failed = true;
 				return;
 			}
-			uint64_t min_point = pass->renderer->timeline_point + 2;
-			if (in->last_used_timeline_point < min_point) {
-				in->last_used_timeline_point = min_point;
+			bool already_recorded = false;
+			struct wlr_kfx_target **sampled;
+			wl_array_for_each(sampled, &pass->kfx_sampled_targets) {
+				if (*sampled == in) {
+					already_recorded = true;
+					break;
+				}
+			}
+			if (!already_recorded) {
+				sampled = wl_array_add(&pass->kfx_sampled_targets, sizeof(*sampled));
+				if (sampled == NULL) {
+					wlr_log_errno(WLR_ERROR, "Allocation failed");
+					pass->failed = true;
+					return;
+				}
+				*sampled = in;
 			}
 		}
 	}
@@ -1116,7 +1130,8 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 	struct kfx_vk_ubo_slab *slab = NULL;
 	uint32_t dyn_offset = 0;
 	if (shader->layout.params_size > 0) {
-		if (!ubo_alloc_slot(pass, options->params, options->params_len,
+		if (!ubo_alloc_slot(pass->renderer, &pass->kfx_ubo_slabs,
+				options->params, options->params_len,
 				&slab, &dyn_offset)) {
 			pixman_region32_fini(&clip);
 			pass->failed = true;
@@ -1178,7 +1193,305 @@ void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 	pixman_region32_fini(&clip);
 }
 
-void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass) {
+bool kfx_vk_renderer_run_target_chain(struct wlr_renderer *wlr_renderer,
+		const struct wlr_kfx_target_draw_step *steps, size_t n_steps) {
+	if (wlr_renderer == NULL || steps == NULL || n_steps == 0) {
+		return false;
+	}
+
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
+	struct kfx_vk_state *kfx = kfx_vk_ensure_state(renderer);
+	if (kfx == NULL) {
+		return false;
+	}
+
+	for (size_t s = 0; s < n_steps; s++) {
+		struct wlr_kfx_target *dst = steps[s].dst;
+		const struct wlr_kfx_draw_options *opt = &steps[s].draw;
+		if (dst == NULL || dst->renderer != renderer || !dst->in_use ||
+				opt->shader == NULL || opt->shader->renderer != renderer) {
+			return false;
+		}
+		struct wlr_kfx_shader *shader = opt->shader;
+		if (opt->params_len != shader->layout.params_size ||
+				(opt->params_len > 0 && opt->params == NULL)) {
+			return false;
+		}
+		if (opt->blend_mode != WLR_RENDER_BLEND_MODE_PREMULTIPLIED &&
+				opt->blend_mode != WLR_RENDER_BLEND_MODE_NONE) {
+			return false;
+		}
+		for (size_t i = 0; i < shader->layout.n_inputs; i++) {
+			struct wlr_kfx_target *in = opt->inputs[i];
+			if (in == NULL || in->renderer != renderer || !in->in_use || in == dst) {
+				return false;
+			}
+			bool ready = in->transitioned;
+			if (!ready) {
+				for (size_t j = 0; j < s; j++) {
+					if (steps[j].dst == in) {
+						ready = true;
+						break;
+					}
+				}
+			}
+			if (!ready) {
+				return false;
+			}
+		}
+	}
+
+	struct wlr_vk_command_buffer *cb = vulkan_acquire_command_buffer(renderer);
+	if (cb == NULL) {
+		return false;
+	}
+
+	VkCommandBufferBeginInfo begin_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+	};
+	VkResult res = vkBeginCommandBuffer(cb->vk, &begin_info);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkBeginCommandBuffer", res);
+		vulkan_reset_command_buffer(cb);
+		return false;
+	}
+
+	for (size_t s = 0; s < n_steps; s++) {
+		struct wlr_kfx_target *dst = steps[s].dst;
+		const struct wlr_kfx_draw_options *opt = &steps[s].draw;
+		struct wlr_kfx_shader *shader = opt->shader;
+
+		bool was_transitioned = dst->transitioned;
+		if (!was_transitioned) {
+			for (size_t j = 0; j < s; j++) {
+				if (steps[j].dst == dst) {
+					was_transitioned = true;
+					break;
+				}
+			}
+		}
+
+		vulkan_change_layout(cb->vk, dst->image,
+			was_transitioned ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			was_transitioned ? VK_ACCESS_SHADER_READ_BIT : 0,
+			VK_IMAGE_LAYOUT_GENERAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
+		VkRect2D render_area = {
+			.extent = {
+				.width = (uint32_t)dst->width,
+				.height = (uint32_t)dst->height,
+			},
+		};
+		VkRenderPassBeginInfo rp_info = {
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+			.renderArea = render_area,
+			.clearValueCount = 0,
+			.renderPass = dst->render_setup->render_pass,
+			.framebuffer = dst->framebuffer,
+		};
+		vkCmdBeginRenderPass(cb->vk, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+		vkCmdSetViewport(cb->vk, 0, 1, &(VkViewport){
+			.width = (float)dst->width,
+			.height = (float)dst->height,
+			.maxDepth = 1.0f,
+		});
+
+		if (opt->dst_box.width > 0 && opt->dst_box.height > 0) {
+			VkPipeline pipe = kfx_shader_get_pipeline(shader,
+				dst->render_setup, opt->blend_mode);
+			if (pipe == VK_NULL_HANDLE) {
+				vkCmdEndRenderPass(cb->vk);
+				goto error_cb;
+			}
+
+			VkDescriptorSet sampler_ds = VK_NULL_HANDLE;
+			if (shader->layout.n_inputs == 1) {
+				sampler_ds = opt->inputs[0]->ds_single;
+			} else if (shader->layout.n_inputs > 1) {
+				struct kfx_vk_temp_ds *temp = calloc(1, sizeof(*temp));
+				if (temp == NULL) {
+					vkCmdEndRenderPass(cb->vk);
+					goto error_cb;
+				}
+				temp->pool = vulkan_alloc_texture_ds(renderer,
+					kfx->sampler_ds_layouts[shader->layout.n_inputs], &temp->ds);
+				if (temp->pool == NULL) {
+					free(temp);
+					vkCmdEndRenderPass(cb->vk);
+					goto error_cb;
+				}
+				VkDescriptorImageInfo img_infos[WLR_KFX_MAX_INPUTS];
+				VkWriteDescriptorSet writes[WLR_KFX_MAX_INPUTS];
+				for (size_t i = 0; i < shader->layout.n_inputs; i++) {
+					img_infos[i] = (VkDescriptorImageInfo){
+						.sampler = VK_NULL_HANDLE,
+						.imageView = opt->inputs[i]->image_view,
+						.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					};
+					writes[i] = (VkWriteDescriptorSet){
+						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+						.dstSet = temp->ds,
+						.dstBinding = (uint32_t)i,
+						.descriptorCount = 1,
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.pImageInfo = &img_infos[i],
+					};
+				}
+				vkUpdateDescriptorSets(renderer->dev->dev,
+					(uint32_t)shader->layout.n_inputs, writes, 0, NULL);
+				wl_list_insert(&cb->kfx_temp_ds, &temp->link);
+				sampler_ds = temp->ds;
+			}
+
+			struct kfx_vk_ubo_slab *slab = NULL;
+			uint32_t dyn_offset = 0;
+			if (shader->layout.params_size > 0) {
+				if (!ubo_alloc_slot(renderer, &cb->kfx_ubo_slabs,
+						opt->params, opt->params_len, &slab, &dyn_offset)) {
+					vkCmdEndRenderPass(cb->vk);
+					goto error_cb;
+				}
+			}
+
+			float projection[9], proj[9], matrix[9];
+			matrix_projection(projection, dst->width, dst->height,
+				WL_OUTPUT_TRANSFORM_FLIPPED_180);
+			wlr_matrix_identity(proj);
+			wlr_matrix_project_box(matrix, &opt->dst_box,
+				WL_OUTPUT_TRANSFORM_NORMAL, proj);
+			wlr_matrix_multiply(matrix, projection, matrix);
+
+			struct wlr_vk_vert_pcr_data vert_pcr_data = {
+				.uv_off = { 0.0f, 0.0f },
+				.uv_size = { 1.0f, 1.0f },
+			};
+			encode_proj_matrix(matrix, vert_pcr_data.mat4);
+
+			vkCmdBindPipeline(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+			vkCmdPushConstants(cb->vk, shader->pipe_layout,
+				VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
+
+			if (sampler_ds != VK_NULL_HANDLE) {
+				vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					shader->pipe_layout, 0, 1, &sampler_ds, 0, NULL);
+			}
+			if (slab != NULL) {
+				vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					shader->pipe_layout, 1, 1, &slab->ds, 1, &dyn_offset);
+			}
+
+			pixman_region32_t clip;
+			if (opt->clip != NULL) {
+				pixman_region32_init(&clip);
+				pixman_region32_copy(&clip, opt->clip);
+			} else {
+				pixman_region32_init_rect(&clip, 0, 0, dst->width, dst->height);
+			}
+			int clip_rects_len = 0;
+			const pixman_box32_t *clip_rects =
+				pixman_region32_rectangles(&clip, &clip_rects_len);
+			for (int i = 0; i < clip_rects_len; i++) {
+				struct wlr_box clip_box = {
+					.x = clip_rects[i].x1,
+					.y = clip_rects[i].y1,
+					.width = clip_rects[i].x2 - clip_rects[i].x1,
+					.height = clip_rects[i].y2 - clip_rects[i].y1,
+				};
+				struct wlr_box intersection;
+				if (!wlr_box_intersection(&intersection, &opt->dst_box, &clip_box)) {
+					continue;
+				}
+				VkRect2D sc_rect = {
+					.offset = { .x = intersection.x, .y = intersection.y },
+					.extent = {
+						.width = (uint32_t)intersection.width,
+						.height = (uint32_t)intersection.height,
+					},
+				};
+				vkCmdSetScissor(cb->vk, 0, 1, &sc_rect);
+				vkCmdDraw(cb->vk, 4, 1, 0, 0);
+			}
+			pixman_region32_fini(&clip);
+		}
+
+		vkCmdEndRenderPass(cb->vk);
+
+		vulkan_change_layout(cb->vk, dst->image,
+			VK_IMAGE_LAYOUT_GENERAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_ACCESS_SHADER_READ_BIT);
+	}
+
+	uint64_t render_timeline_point = vulkan_end_command_buffer(cb, renderer);
+	if (render_timeline_point == 0) {
+		goto error_cb;
+	}
+
+	VkCommandBufferSubmitInfoKHR cb_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO_KHR,
+		.commandBuffer = cb->vk,
+	};
+	VkSemaphoreSubmitInfoKHR signal_info = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR,
+		.semaphore = renderer->timeline_semaphore,
+		.value = render_timeline_point,
+	};
+	VkSubmitInfo2KHR submit = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2_KHR,
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &cb_info,
+		.signalSemaphoreInfoCount = 1,
+		.pSignalSemaphoreInfos = &signal_info,
+	};
+
+	res = renderer->dev->api.vkQueueSubmit2KHR(renderer->dev->queue, 1, &submit, VK_NULL_HANDLE);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkQueueSubmit2KHR", res);
+		if (res == VK_ERROR_DEVICE_LOST) {
+			wl_signal_emit_mutable(&renderer->wlr_renderer.events.lost, NULL);
+		}
+		goto error_cb;
+	}
+
+	for (size_t s = 0; s < n_steps; s++) {
+		struct wlr_kfx_target *dst = steps[s].dst;
+		const struct wlr_kfx_draw_options *opt = &steps[s].draw;
+		dst->transitioned = true;
+		dst->last_used_timeline_point = render_timeline_point;
+		for (size_t i = 0; i < opt->shader->layout.n_inputs; i++) {
+			opt->inputs[i]->last_used_timeline_point = render_timeline_point;
+		}
+	}
+
+	if (!wl_list_empty(&kfx->targets)) {
+		kfx_evict_idle_targets(renderer, kfx, kfx_now_ms());
+	}
+	return true;
+
+error_cb:
+	kfx_vk_cb_release(cb, renderer);
+	vulkan_reset_command_buffer(cb);
+	return false;
+}
+
+void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass, uint64_t render_timeline_point) {
+	if (pass->kfx_target != NULL) {
+		pass->kfx_target->last_used_timeline_point = render_timeline_point;
+	}
+	struct wlr_kfx_target **sampled;
+	wl_array_for_each(sampled, &pass->kfx_sampled_targets) {
+		(*sampled)->last_used_timeline_point = render_timeline_point;
+	}
+	wl_array_release(&pass->kfx_sampled_targets);
+	wl_array_init(&pass->kfx_sampled_targets);
+
 	if (!wl_list_empty(&pass->kfx_ubo_slabs)) {
 		wl_list_insert_list(&pass->command_buffer->kfx_ubo_slabs, &pass->kfx_ubo_slabs);
 		wl_list_init(&pass->kfx_ubo_slabs);
@@ -1193,6 +1506,7 @@ void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass) {
 }
 
 void kfx_vk_pass_cleanup(struct wlr_vk_render_pass *pass) {
+	wl_array_release(&pass->kfx_sampled_targets);
 	if (pass->renderer->kfx == NULL) {
 		return;
 	}

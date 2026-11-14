@@ -30,6 +30,7 @@ void vulkan_render_pass_init(struct wlr_vk_render_pass *pass,
 	wlr_render_pass_init(&pass->base, &render_pass_impl);
 	wl_list_init(&pass->kfx_ubo_slabs);
 	wl_list_init(&pass->kfx_temp_ds);
+	wl_array_init(&pass->kfx_sampled_targets);
 	pass->renderer = renderer;
 	rect_union_init(&pass->updated_region);
 }
@@ -700,11 +701,7 @@ skip_render_buffer:
 		wlr_log(WLR_ERROR, "Failed to sync render buffer");
 	}
 
-	if (pass->kfx_target_timeline_point != NULL) {
-		*pass->kfx_target_timeline_point = render_timeline_point;
-	}
-
-	kfx_vk_pass_submit(pass);
+	kfx_vk_pass_submit(pass, render_timeline_point);
 	render_pass_destroy(pass);
 	if (render_buffer != NULL) {
 		wlr_buffer_unlock(render_buffer->wlr_buffer);
@@ -1374,6 +1371,7 @@ struct wlr_vk_render_pass *vulkan_begin_render_pass_with_flags(struct wlr_vk_ren
 	wlr_render_pass_init(&pass->base, &render_pass_impl);
 	wl_list_init(&pass->kfx_ubo_slabs);
 	wl_list_init(&pass->kfx_temp_ds);
+	wl_array_init(&pass->kfx_sampled_targets);
 	pass->renderer = renderer;
 	pass->two_pass = using_two_pass_pathway;
 	if (options != NULL && options->color_transform != NULL) {

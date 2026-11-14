@@ -59,7 +59,8 @@ vec3 linear_color_to_bt1886(vec3 color) {
 	return pow(L / a, vec3(1.0 / 2.4)) - vec3(b);
 }
 
-// Ulichney (1993) 16x16 toroidal void-and-cluster blue-noise rank table (0..255)
+// Kajo-generated 16x16 toroidal void-and-cluster blue-noise rank table (0..255),
+// synthesized via Ulichney (1993)'s algorithm (sigma=1.5, seed=0x517cc1b727220a95, MIT).
 float output_dither_blue_noise(vec2 frag_coord) {
 	const int blue_noise16[256] = int[256](
 		233, 108, 142,  79,  13, 185,  70, 208, 130, 245, 158,  30,  56, 253,  81, 194,

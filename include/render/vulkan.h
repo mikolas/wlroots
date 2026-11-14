@@ -449,10 +449,10 @@ struct wlr_vk_render_pass {
 	struct wlr_kfx_target *kfx_target;
 	VkImage kfx_target_image;
 	bool *kfx_target_transitioned;
-	uint64_t *kfx_target_timeline_point;
 	bool kfx_dither;
 	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
 	struct wl_list kfx_temp_ds;   // struct kfx_vk_temp_ds.link
+	struct wl_array kfx_sampled_targets; // struct wlr_kfx_target *
 };
 
 struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(

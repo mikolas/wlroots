@@ -12,6 +12,7 @@ struct wlr_kfx_draw_options;
 struct wlr_kfx_shader;
 struct wlr_kfx_shader_layout;
 struct wlr_kfx_target;
+struct wlr_kfx_target_draw_step;
 struct wlr_render_pass;
 struct wlr_renderer;
 struct wlr_vk_command_buffer;
@@ -36,8 +37,10 @@ void kfx_vk_target_release(struct wlr_kfx_target *target);
 void kfx_vk_target_get_size(struct wlr_kfx_target *target,
 	int *width, int *height);
 struct wlr_render_pass *kfx_vk_target_begin_pass(struct wlr_kfx_target *target);
+bool kfx_vk_renderer_run_target_chain(struct wlr_renderer *renderer,
+	const struct wlr_kfx_target_draw_step *steps, size_t n_steps);
 
-void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass);
+void kfx_vk_pass_submit(struct wlr_vk_render_pass *pass, uint64_t render_timeline_point);
 void kfx_vk_pass_cleanup(struct wlr_vk_render_pass *pass);
 void kfx_vk_cb_release(struct wlr_vk_command_buffer *cb,
 	struct wlr_vk_renderer *renderer);
