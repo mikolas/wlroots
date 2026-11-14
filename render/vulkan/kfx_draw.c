@@ -1221,6 +1221,9 @@ bool kfx_vk_renderer_run_target_chain(struct wlr_renderer *wlr_renderer,
 				opt->blend_mode != WLR_RENDER_BLEND_MODE_NONE) {
 			return false;
 		}
+		if (opt->dst_box.width <= 0 || opt->dst_box.height <= 0) {
+			return false;
+		}
 		for (size_t i = 0; i < shader->layout.n_inputs; i++) {
 			struct wlr_kfx_target *in = opt->inputs[i];
 			if (in == NULL || in->renderer != renderer || !in->in_use || in == dst) {
@@ -1300,123 +1303,121 @@ bool kfx_vk_renderer_run_target_chain(struct wlr_renderer *wlr_renderer,
 			.maxDepth = 1.0f,
 		});
 
-		if (opt->dst_box.width > 0 && opt->dst_box.height > 0) {
-			VkPipeline pipe = kfx_shader_get_pipeline(shader,
-				dst->render_setup, opt->blend_mode);
-			if (pipe == VK_NULL_HANDLE) {
+		VkPipeline pipe = kfx_shader_get_pipeline(shader,
+			dst->render_setup, opt->blend_mode);
+		if (pipe == VK_NULL_HANDLE) {
+			vkCmdEndRenderPass(cb->vk);
+			goto error_cb;
+		}
+
+		VkDescriptorSet sampler_ds = VK_NULL_HANDLE;
+		if (shader->layout.n_inputs == 1) {
+			sampler_ds = opt->inputs[0]->ds_single;
+		} else if (shader->layout.n_inputs > 1) {
+			struct kfx_vk_temp_ds *temp = calloc(1, sizeof(*temp));
+			if (temp == NULL) {
 				vkCmdEndRenderPass(cb->vk);
 				goto error_cb;
 			}
-
-			VkDescriptorSet sampler_ds = VK_NULL_HANDLE;
-			if (shader->layout.n_inputs == 1) {
-				sampler_ds = opt->inputs[0]->ds_single;
-			} else if (shader->layout.n_inputs > 1) {
-				struct kfx_vk_temp_ds *temp = calloc(1, sizeof(*temp));
-				if (temp == NULL) {
-					vkCmdEndRenderPass(cb->vk);
-					goto error_cb;
-				}
-				temp->pool = vulkan_alloc_texture_ds(renderer,
-					kfx->sampler_ds_layouts[shader->layout.n_inputs], &temp->ds);
-				if (temp->pool == NULL) {
-					free(temp);
-					vkCmdEndRenderPass(cb->vk);
-					goto error_cb;
-				}
-				VkDescriptorImageInfo img_infos[WLR_KFX_MAX_INPUTS];
-				VkWriteDescriptorSet writes[WLR_KFX_MAX_INPUTS];
-				for (size_t i = 0; i < shader->layout.n_inputs; i++) {
-					img_infos[i] = (VkDescriptorImageInfo){
-						.sampler = VK_NULL_HANDLE,
-						.imageView = opt->inputs[i]->image_view,
-						.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					};
-					writes[i] = (VkWriteDescriptorSet){
-						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-						.dstSet = temp->ds,
-						.dstBinding = (uint32_t)i,
-						.descriptorCount = 1,
-						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-						.pImageInfo = &img_infos[i],
-					};
-				}
-				vkUpdateDescriptorSets(renderer->dev->dev,
-					(uint32_t)shader->layout.n_inputs, writes, 0, NULL);
-				wl_list_insert(&cb->kfx_temp_ds, &temp->link);
-				sampler_ds = temp->ds;
+			temp->pool = vulkan_alloc_texture_ds(renderer,
+				kfx->sampler_ds_layouts[shader->layout.n_inputs], &temp->ds);
+			if (temp->pool == NULL) {
+				free(temp);
+				vkCmdEndRenderPass(cb->vk);
+				goto error_cb;
 			}
-
-			struct kfx_vk_ubo_slab *slab = NULL;
-			uint32_t dyn_offset = 0;
-			if (shader->layout.params_size > 0) {
-				if (!ubo_alloc_slot(renderer, &cb->kfx_ubo_slabs,
-						opt->params, opt->params_len, &slab, &dyn_offset)) {
-					vkCmdEndRenderPass(cb->vk);
-					goto error_cb;
-				}
-			}
-
-			float projection[9], proj[9], matrix[9];
-			matrix_projection(projection, dst->width, dst->height,
-				WL_OUTPUT_TRANSFORM_FLIPPED_180);
-			wlr_matrix_identity(proj);
-			wlr_matrix_project_box(matrix, &opt->dst_box,
-				WL_OUTPUT_TRANSFORM_NORMAL, proj);
-			wlr_matrix_multiply(matrix, projection, matrix);
-
-			struct wlr_vk_vert_pcr_data vert_pcr_data = {
-				.uv_off = { 0.0f, 0.0f },
-				.uv_size = { 1.0f, 1.0f },
-			};
-			encode_proj_matrix(matrix, vert_pcr_data.mat4);
-
-			vkCmdBindPipeline(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-			vkCmdPushConstants(cb->vk, shader->pipe_layout,
-				VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
-
-			if (sampler_ds != VK_NULL_HANDLE) {
-				vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					shader->pipe_layout, 0, 1, &sampler_ds, 0, NULL);
-			}
-			if (slab != NULL) {
-				vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					shader->pipe_layout, 1, 1, &slab->ds, 1, &dyn_offset);
-			}
-
-			pixman_region32_t clip;
-			if (opt->clip != NULL) {
-				pixman_region32_init(&clip);
-				pixman_region32_copy(&clip, opt->clip);
-			} else {
-				pixman_region32_init_rect(&clip, 0, 0, dst->width, dst->height);
-			}
-			int clip_rects_len = 0;
-			const pixman_box32_t *clip_rects =
-				pixman_region32_rectangles(&clip, &clip_rects_len);
-			for (int i = 0; i < clip_rects_len; i++) {
-				struct wlr_box clip_box = {
-					.x = clip_rects[i].x1,
-					.y = clip_rects[i].y1,
-					.width = clip_rects[i].x2 - clip_rects[i].x1,
-					.height = clip_rects[i].y2 - clip_rects[i].y1,
+			VkDescriptorImageInfo img_infos[WLR_KFX_MAX_INPUTS];
+			VkWriteDescriptorSet writes[WLR_KFX_MAX_INPUTS];
+			for (size_t i = 0; i < shader->layout.n_inputs; i++) {
+				img_infos[i] = (VkDescriptorImageInfo){
+					.sampler = VK_NULL_HANDLE,
+					.imageView = opt->inputs[i]->image_view,
+					.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 				};
-				struct wlr_box intersection;
-				if (!wlr_box_intersection(&intersection, &opt->dst_box, &clip_box)) {
-					continue;
-				}
-				VkRect2D sc_rect = {
-					.offset = { .x = intersection.x, .y = intersection.y },
-					.extent = {
-						.width = (uint32_t)intersection.width,
-						.height = (uint32_t)intersection.height,
-					},
+				writes[i] = (VkWriteDescriptorSet){
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = temp->ds,
+					.dstBinding = (uint32_t)i,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &img_infos[i],
 				};
-				vkCmdSetScissor(cb->vk, 0, 1, &sc_rect);
-				vkCmdDraw(cb->vk, 4, 1, 0, 0);
 			}
-			pixman_region32_fini(&clip);
+			vkUpdateDescriptorSets(renderer->dev->dev,
+				(uint32_t)shader->layout.n_inputs, writes, 0, NULL);
+			wl_list_insert(&cb->kfx_temp_ds, &temp->link);
+			sampler_ds = temp->ds;
 		}
+
+		struct kfx_vk_ubo_slab *slab = NULL;
+		uint32_t dyn_offset = 0;
+		if (shader->layout.params_size > 0) {
+			if (!ubo_alloc_slot(renderer, &cb->kfx_ubo_slabs,
+					opt->params, opt->params_len, &slab, &dyn_offset)) {
+				vkCmdEndRenderPass(cb->vk);
+				goto error_cb;
+			}
+		}
+
+		float projection[9], proj[9], matrix[9];
+		matrix_projection(projection, dst->width, dst->height,
+			WL_OUTPUT_TRANSFORM_FLIPPED_180);
+		wlr_matrix_identity(proj);
+		wlr_matrix_project_box(matrix, &opt->dst_box,
+			WL_OUTPUT_TRANSFORM_NORMAL, proj);
+		wlr_matrix_multiply(matrix, projection, matrix);
+
+		struct wlr_vk_vert_pcr_data vert_pcr_data = {
+			.uv_off = { 0.0f, 0.0f },
+			.uv_size = { 1.0f, 1.0f },
+		};
+		encode_proj_matrix(matrix, vert_pcr_data.mat4);
+
+		vkCmdBindPipeline(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+		vkCmdPushConstants(cb->vk, shader->pipe_layout,
+			VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vert_pcr_data), &vert_pcr_data);
+
+		if (sampler_ds != VK_NULL_HANDLE) {
+			vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				shader->pipe_layout, 0, 1, &sampler_ds, 0, NULL);
+		}
+		if (slab != NULL) {
+			vkCmdBindDescriptorSets(cb->vk, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				shader->pipe_layout, 1, 1, &slab->ds, 1, &dyn_offset);
+		}
+
+		pixman_region32_t clip;
+		if (opt->clip != NULL) {
+			pixman_region32_init(&clip);
+			pixman_region32_copy(&clip, opt->clip);
+		} else {
+			pixman_region32_init_rect(&clip, 0, 0, dst->width, dst->height);
+		}
+		int clip_rects_len = 0;
+		const pixman_box32_t *clip_rects =
+			pixman_region32_rectangles(&clip, &clip_rects_len);
+		for (int i = 0; i < clip_rects_len; i++) {
+			struct wlr_box clip_box = {
+				.x = clip_rects[i].x1,
+				.y = clip_rects[i].y1,
+				.width = clip_rects[i].x2 - clip_rects[i].x1,
+				.height = clip_rects[i].y2 - clip_rects[i].y1,
+			};
+			struct wlr_box intersection;
+			if (!wlr_box_intersection(&intersection, &opt->dst_box, &clip_box)) {
+				continue;
+			}
+			VkRect2D sc_rect = {
+				.offset = { .x = intersection.x, .y = intersection.y },
+				.extent = {
+					.width = (uint32_t)intersection.width,
+					.height = (uint32_t)intersection.height,
+				},
+			};
+			vkCmdSetScissor(cb->vk, 0, 1, &sc_rect);
+			vkCmdDraw(cb->vk, 4, 1, 0, 0);
+		}
+		pixman_region32_fini(&clip);
 
 		vkCmdEndRenderPass(cb->vk);
 
