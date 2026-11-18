@@ -80,6 +80,19 @@ void wlr_kfx_render_pass_set_dither(struct wlr_render_pass *pass, bool enable_di
 #endif
 }
 
+void wlr_kfx_render_pass_set_tonemap(struct wlr_render_pass *pass,
+		bool enable_tonemap, float max_pq) {
+#if WLR_HAS_VULKAN_RENDERER
+	if (pass != NULL) {
+		kfx_vk_render_pass_set_tonemap(pass, enable_tonemap, max_pq);
+	}
+#else
+	(void)pass;
+	(void)enable_tonemap;
+	(void)max_pq;
+#endif
+}
+
 struct wlr_kfx_target *wlr_kfx_target_acquire(struct wlr_renderer *renderer,
 		int width, int height) {
 #if WLR_HAS_VULKAN_RENDERER

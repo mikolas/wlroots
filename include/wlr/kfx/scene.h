@@ -58,6 +58,12 @@ void wlr_kfx_node_hook_finish(struct wlr_kfx_node_hook *hook);
 
 void wlr_kfx_output_set_two_pass(struct wlr_output *output, bool require_two_pass);
 void wlr_kfx_output_set_dither(struct wlr_output *output, bool enable_dither);
+void wlr_kfx_output_set_sdr_white_nits(struct wlr_output *output, float sdr_white_nits);
+float wlr_kfx_output_get_sdr_white_nits(struct wlr_output *output);
+void wlr_kfx_output_set_tonemap(struct wlr_output *output, bool enable_tonemap,
+	float peak_luminance_nits);
+bool wlr_kfx_output_get_tonemap(struct wlr_output *output, float *out_peak_luminance_nits);
+float wlr_kfx_output_get_hdr_headroom(struct wlr_output *output);
 
 bool wlr_kfx_scene_output_damage_intersects(struct wlr_scene_output *scene_output,
 	const struct wlr_box *box);

@@ -21,5 +21,8 @@ struct wlr_output;
 struct wlr_kfx_node_hook *kfx_scene_node_get_hook(struct wlr_scene_node *node);
 bool kfx_output_requires_two_pass(struct wlr_output *output);
 bool kfx_output_get_dither(struct wlr_output *output);
+bool kfx_output_consume_color_dirty(struct wlr_output *output);
+float kfx_output_get_sdr_white_nits(struct wlr_output *output);
+bool kfx_output_get_tonemap_max_pq(struct wlr_output *output, float *out_max_pq);
 
 #endif

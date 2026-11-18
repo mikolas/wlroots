@@ -22,6 +22,7 @@
 #include "types/wlr_scene.h"
 #include "util/array.h"
 #include "util/env.h"
+#include "util/matrix.h"
 #include "util/time.h"
 
 #include <wlr/config.h>
@@ -2265,6 +2266,30 @@ static void scene_output_state_attempt_gamma(struct wlr_scene_output *scene_outp
 	wlr_output_state_finish(&gamma_pending);
 }
 
+static bool kfx_color_transform_extract_matrix(struct wlr_color_transform *tr,
+		float out[static 9]) {
+	if (tr == NULL) {
+		return false;
+	}
+	if (tr->type == COLOR_TRANSFORM_MATRIX) {
+		struct wlr_color_transform_matrix *mat = wl_container_of(tr, mat, base);
+		memcpy(out, mat->matrix, sizeof(mat->matrix));
+		return true;
+	}
+	if (tr->type == COLOR_TRANSFORM_PIPELINE) {
+		struct wlr_color_transform_pipeline *pipe = wl_container_of(tr, pipe, base);
+		if (pipe->len == 2 &&
+				pipe->transforms[0]->type == COLOR_TRANSFORM_MATRIX &&
+				pipe->transforms[1]->type == COLOR_TRANSFORM_INVERSE_EOTF) {
+			struct wlr_color_transform_matrix *mat =
+				wl_container_of(pipe->transforms[0], mat, base);
+			memcpy(out, mat->matrix, sizeof(mat->matrix));
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool scene_output_combine_color_transforms(
 		struct wlr_scene_output *scene_output, struct wlr_color_transform *supplied,
 		const struct wlr_output_image_description *img_desc, bool render_gamma_lut) {
@@ -2274,7 +2299,6 @@ static bool scene_output_combine_color_transforms(
 	struct wlr_color_transform *user_gamma = NULL;
 
 	if (img_desc != NULL) {
-		assert(supplied == NULL);
 		struct wlr_color_primaries primaries_srgb;
 		wlr_color_primaries_from_named(&primaries_srgb, WLR_COLOR_NAMED_PRIMARIES_SRGB);
 		struct wlr_color_primaries primaries;
@@ -2286,9 +2310,19 @@ static bool scene_output_combine_color_transforms(
 		wlr_color_transfer_function_get_default_luminance(
 			WLR_COLOR_TRANSFER_FUNCTION_SRGB, &srgb_lum);
 		wlr_color_transfer_function_get_default_luminance(img_desc->transfer_function, &dst_lum);
+		float sdr_white_nits = kfx_output_get_sdr_white_nits(scene_output->output);
+		if (sdr_white_nits > 0.0f) {
+			dst_lum.reference = sdr_white_nits;
+		}
 		float luminance_multiplier = get_luminance_multiplier(&srgb_lum, &dst_lum);
 		for (int i = 0; i < 9; ++i) {
 			matrix[i] *= luminance_multiplier;
+		}
+		float supplied_matrix[9];
+		if (supplied != NULL && kfx_color_transform_extract_matrix(supplied, supplied_matrix)) {
+			wlr_matrix_multiply(matrix, matrix, supplied_matrix);
+		} else {
+			assert(supplied == NULL);
 		}
 
 		color_matrix = wlr_color_transform_init_matrix(matrix);
@@ -2360,6 +2394,12 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	struct wlr_output *output = scene_output->output;
 	enum wlr_scene_debug_damage_option debug_damage =
 		scene_output->scene->debug_damage_option;
+
+	bool kfx_color_dirty = kfx_output_consume_color_dirty(output);
+	if (kfx_color_dirty ||
+			scene_output->prev_supplied_color_transform != options->color_transform) {
+		scene_output_damage_whole(scene_output);
+	}
 
 	bool render_gamma_lut = false;
 	if (wlr_output_get_gamma_size(output) == 0 && output->renderer->features.output_color_transform) {
@@ -2545,7 +2585,8 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	if ((render_gamma_lut
 			&& scene_output->gamma_lut_color_transform != scene_output->prev_gamma_lut_color_transform)
 			|| scene_output->prev_supplied_color_transform != options->color_transform
-			|| (state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION)) {
+			|| (state->committed & WLR_OUTPUT_STATE_IMAGE_DESCRIPTION)
+			|| kfx_color_dirty) {
 		const struct wlr_output_image_description *output_description =
 			output_pending_image_description(output, state);
 		if (!scene_output_combine_color_transforms(scene_output, options->color_transform,
@@ -2569,6 +2610,10 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	}
 	if (kfx_output_get_dither(output)) {
 		wlr_kfx_render_pass_set_dither(render_pass, true);
+	}
+	float tonemap_max_pq = 0.0f;
+	if (kfx_output_get_tonemap_max_pq(output, &tonemap_max_pq)) {
+		wlr_kfx_render_pass_set_tonemap(render_pass, true, tonemap_max_pq);
 	}
 
 	render_data.render_pass = render_pass;

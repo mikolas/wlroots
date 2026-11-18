@@ -976,6 +976,17 @@ void kfx_vk_render_pass_set_dither(struct wlr_render_pass *wlr_pass, bool enable
 	pass->kfx_dither = enable_dither;
 }
 
+void kfx_vk_render_pass_set_tonemap(struct wlr_render_pass *wlr_pass,
+		bool enable_tonemap, float max_pq) {
+	if (!vulkan_render_pass_is_vk(wlr_pass)) {
+		return;
+	}
+	struct wlr_vk_render_pass *pass = vulkan_get_render_pass(wlr_pass);
+	bool active = enable_tonemap && max_pq > 0.0f && max_pq < 1.0f;
+	pass->kfx_tonemap = active;
+	pass->kfx_tonemap_max_pq = active ? max_pq : 0.0f;
+}
+
 void kfx_vk_render_pass_add_draw(struct wlr_render_pass *wlr_pass,
 		const struct wlr_kfx_draw_options *options) {
 	if (!vulkan_render_pass_is_vk(wlr_pass)) {

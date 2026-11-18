@@ -304,6 +304,7 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 		struct wlr_vk_frag_output_pcr_data frag_pcr_data = {
 			.lut_3d_offset = 0.5f / dim,
 			.lut_3d_scale = (float)(dim - 1) / dim,
+			.tonemap_max_pq = pass->kfx_tonemap ? pass->kfx_tonemap_max_pq : 0.0f,
 		};
 
 		encode_color_matrix(matrix, frag_pcr_data.matrix);
@@ -330,9 +331,10 @@ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
 				break;
 			}
 		}
-		if (pass->kfx_dither) {
+		if (pass->kfx_dither || pass->kfx_tonemap) {
 			pipeline = vulkan_setup_get_dither_output_pipeline(
-				render_buffer->two_pass.render_setup, need_lut, tf);
+				render_buffer->two_pass.render_setup, need_lut, tf,
+				pass->kfx_dither, pass->kfx_tonemap);
 		}
 		bind_pipeline(pass, pipeline);
 		vkCmdPushConstants(render_cb->vk, renderer->output_pipe_layout,

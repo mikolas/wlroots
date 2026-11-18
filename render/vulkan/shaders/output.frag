@@ -12,10 +12,12 @@ layout(push_constant, row_major) uniform UBO {
 	layout(offset = 80) mat4 matrix;
 	float lut_3d_offset;
 	float lut_3d_scale;
+	float tonemap_max_pq;
 } data;
 
 layout (constant_id = 0) const int OUTPUT_TRANSFORM = 0;
 layout (constant_id = 1) const int OUTPUT_DITHER_QUANT = 0;
+layout (constant_id = 2) const int OUTPUT_TONEMAP = 0;
 
 // Matches enum wlr_vk_output_transform
 #define OUTPUT_TRANSFORM_IDENTITY 0
@@ -46,6 +48,30 @@ vec3 linear_color_to_pq(vec3 color) {
 	float n = 0.1593017578125;
 	vec3 pow_n = pow(clamp(color, vec3(0), vec3(1)), vec3(n));
 	return pow((vec3(c1) + c2 * pow_n) / (vec3(1) + c3 * pow_n), vec3(m));
+}
+
+// ITU-R BT.2390-11 §5.4 EETF cubic Hermite roll-off in ST.2084 PQ [0, 1] domain
+// (source container max E_max = 1.0 = 10000 cd/m^2, target peak max_pq = PQ(L_peak / 10000)).
+float bt2390_channel_pq(float e1, float max_pq) {
+	float ks = max(1.5 * max_pq - 0.5, 0.0);
+	if (e1 <= ks || max_pq >= 1.0 || ks >= 1.0) {
+		return min(e1, max_pq);
+	}
+	float t = clamp((e1 - ks) / (1.0 - ks), 0.0, 1.0);
+	float t2 = t * t;
+	float t3 = t2 * t;
+	float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+	float h10 = t3 - 2.0 * t2 + t;
+	float h01 = -2.0 * t3 + 3.0 * t2;
+	return h00 * ks + h10 * (1.0 - ks) + h01 * max_pq;
+}
+
+vec3 bt2390_eetf_pq(vec3 pq, float max_pq) {
+	return vec3(
+		bt2390_channel_pq(pq.r, max_pq),
+		bt2390_channel_pq(pq.g, max_pq),
+		bt2390_channel_pq(pq.b, max_pq)
+	);
 }
 
 vec3 linear_color_to_bt1886(vec3 color) {
@@ -108,6 +134,9 @@ void main() {
 		rgb = texture(lut_3d, pos).rgb;
 	} else if (OUTPUT_TRANSFORM == OUTPUT_TRANSFORM_INVERSE_ST2084_PQ) {
 		rgb = linear_color_to_pq(rgb);
+		if (OUTPUT_TONEMAP != 0 && data.tonemap_max_pq > 0.0 && data.tonemap_max_pq < 1.0) {
+			rgb = bt2390_eetf_pq(rgb, data.tonemap_max_pq);
+		}
 	} else if (OUTPUT_TRANSFORM == OUTPUT_TRANSFORM_INVERSE_SRGB) {
 		// Produce sRGB encoded values
 		rgb = linear_color_to_srgb(rgb);

@@ -184,6 +184,8 @@ static void destroy_render_format_setup(struct wlr_vk_renderer *renderer,
 	vkDestroyPipeline(dev, setup->output_pipe_dither_lut3d, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_dither_gamma22, NULL);
 	vkDestroyPipeline(dev, setup->output_pipe_dither_bt1886, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_tonemap_pq, NULL);
+	vkDestroyPipeline(dev, setup->output_pipe_tonemap_dither_pq, NULL);
 
 	struct wlr_vk_pipeline *pipeline, *tmp_pipeline;
 	wl_list_for_each_safe(pipeline, tmp_pipeline, &setup->pipelines, link) {
@@ -1908,17 +1910,19 @@ static uint32_t vulkan_format_dither_quant(VkFormat format) {
 	}
 }
 
-static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
+static bool init_blend_to_output_pipeline_ext(struct wlr_vk_renderer *renderer,
 		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
-		enum wlr_vk_output_transform transform, uint32_t dither_quant) {
+		enum wlr_vk_output_transform transform, uint32_t dither_quant,
+		uint32_t tonemap) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
-	uint32_t spec_data[2] = {
+	uint32_t spec_data[3] = {
 		(uint32_t)transform,
 		dither_quant,
+		tonemap,
 	};
-	VkSpecializationMapEntry spec_entries[2] = {
+	VkSpecializationMapEntry spec_entries[3] = {
 		{
 			.constantID = 0,
 			.offset = 0,
@@ -1929,9 +1933,14 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 			.offset = sizeof(uint32_t),
 			.size = sizeof(uint32_t),
 		},
+		{
+			.constantID = 2,
+			.offset = 2 * sizeof(uint32_t),
+			.size = sizeof(uint32_t),
+		},
 	};
 	VkSpecializationInfo specialization = {
-		.mapEntryCount = 2,
+		.mapEntryCount = 3,
 		.pMapEntries = spec_entries,
 		.dataSize = sizeof(spec_data),
 		.pData = spec_data,
@@ -2031,6 +2040,13 @@ static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
 	}
 
 	return true;
+}
+
+static bool init_blend_to_output_pipeline(struct wlr_vk_renderer *renderer,
+		VkRenderPass rp, VkPipelineLayout pipe_layout, VkPipeline *pipe,
+		enum wlr_vk_output_transform transform, uint32_t dither_quant) {
+	return init_blend_to_output_pipeline_ext(renderer, rp, pipe_layout, pipe,
+		transform, dither_quant, 0u);
 }
 
 static VkSamplerYcbcrModelConversion ycbcr_model_from_wlr(enum wlr_color_encoding encoding) {
@@ -2589,7 +2605,7 @@ struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
 
 VkPipeline vulkan_setup_get_dither_output_pipeline(
 		struct wlr_vk_render_format_setup *setup, bool need_lut,
-		enum wlr_color_transfer_function tf) {
+		enum wlr_color_transfer_function tf, bool dither, bool tonemap) {
 	enum wlr_vk_output_transform transform = WLR_VK_OUTPUT_TRANSFORM_INVERSE_GAMMA22;
 	VkPipeline base_pipe = setup->output_pipe_gamma22;
 	VkPipeline *dither_slot = &setup->output_pipe_dither_gamma22;
@@ -2626,8 +2642,24 @@ VkPipeline vulkan_setup_get_dither_output_pipeline(
 			break;
 		}
 	}
-	uint32_t quant = setup->render_format != NULL ?
+	uint32_t quant = (dither && setup->render_format != NULL) ?
 		vulkan_format_dither_quant(setup->render_format->vk) : 0u;
+	bool use_tonemap = tonemap && !need_lut &&
+		tf == WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+	if (use_tonemap) {
+		VkPipeline *tm_slot = quant > 0u ?
+			&setup->output_pipe_tonemap_dither_pq :
+			&setup->output_pipe_tonemap_pq;
+		if (*tm_slot == VK_NULL_HANDLE) {
+			if (!init_blend_to_output_pipeline_ext(setup->renderer,
+					setup->render_pass,
+					setup->renderer->output_pipe_layout,
+					tm_slot, transform, quant, 1u)) {
+				return base_pipe;
+			}
+		}
+		return *tm_slot;
+	}
 	if (quant == 0u) {
 		return base_pipe;
 	}

@@ -53,6 +53,8 @@ struct wlr_render_pass *wlr_kfx_renderer_begin_buffer_pass(
 	struct wlr_renderer *renderer, struct wlr_buffer *buffer,
 	const struct wlr_buffer_pass_options *options, bool require_two_pass);
 void wlr_kfx_render_pass_set_dither(struct wlr_render_pass *pass, bool enable_dither);
+void wlr_kfx_render_pass_set_tonemap(struct wlr_render_pass *pass,
+	bool enable_tonemap, float max_pq);
 
 struct wlr_kfx_target *wlr_kfx_target_acquire(struct wlr_renderer *renderer,
 	int width, int height);

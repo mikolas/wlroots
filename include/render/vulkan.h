@@ -219,6 +219,8 @@ struct wlr_vk_render_format_setup {
 	VkPipeline output_pipe_dither_lut3d;
 	VkPipeline output_pipe_dither_gamma22;
 	VkPipeline output_pipe_dither_bt1886;
+	VkPipeline output_pipe_tonemap_pq;
+	VkPipeline output_pipe_tonemap_dither_pq;
 
 	struct wlr_vk_renderer *renderer;
 	struct wl_list pipelines; // struct wlr_vk_pipeline.link
@@ -386,6 +388,7 @@ struct wlr_vk_frag_output_pcr_data {
 	float matrix[4][4]; // only a 3x3 subset is used
 	float lut_3d_offset;
 	float lut_3d_scale;
+	float tonemap_max_pq;
 };
 
 struct wlr_vk_texture_view {
@@ -450,6 +453,8 @@ struct wlr_vk_render_pass {
 	VkImage kfx_target_image;
 	bool *kfx_target_transitioned;
 	bool kfx_dither;
+	bool kfx_tonemap;
+	float kfx_tonemap_max_pq;
 	struct wl_list kfx_ubo_slabs; // struct kfx_vk_ubo_slab.link
 	struct wl_list kfx_temp_ds;   // struct kfx_vk_temp_ds.link
 	struct wl_array kfx_sampled_targets; // struct wlr_kfx_target *
@@ -460,7 +465,7 @@ struct wlr_vk_render_format_setup *vulkan_find_or_create_render_setup(
 	bool use_blending_buffer, bool srgb);
 VkPipeline vulkan_setup_get_dither_output_pipeline(
 	struct wlr_vk_render_format_setup *setup, bool need_lut,
-	enum wlr_color_transfer_function tf);
+	enum wlr_color_transfer_function tf, bool dither, bool tonemap);
 void vulkan_render_pass_init(struct wlr_vk_render_pass *pass,
 	struct wlr_vk_renderer *renderer);
 

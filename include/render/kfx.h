@@ -23,6 +23,8 @@ struct wlr_render_pass *vulkan_begin_buffer_pass_with_flags(
 	struct wlr_renderer *wlr_renderer, struct wlr_buffer *buffer,
 	const struct wlr_buffer_pass_options *options, bool force_two_pass);
 void kfx_vk_render_pass_set_dither(struct wlr_render_pass *pass, bool enable_dither);
+void kfx_vk_render_pass_set_tonemap(struct wlr_render_pass *pass,
+	bool enable_tonemap, float max_pq);
 
 struct wlr_kfx_shader *kfx_vk_shader_create(struct wlr_renderer *renderer,
 	const uint32_t *spirv, size_t len,
