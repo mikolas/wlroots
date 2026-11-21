@@ -147,8 +147,9 @@ void main() {
 	}
 
 	if (OUTPUT_DITHER_QUANT > 0) {
-		float d = output_dither_blue_noise(gl_FragCoord.xy) / float(OUTPUT_DITHER_QUANT);
-		rgb = clamp(rgb + vec3(d), vec3(0.0), vec3(1.0));
+		float q = float(OUTPUT_DITHER_QUANT);
+		float d = output_dither_blue_noise(gl_FragCoord.xy);
+		rgb = floor(clamp(rgb * q + vec3(0.5 + d), vec3(0.0), vec3(q))) / q;
 	}
 
 	// Back to pre-multiplied alpha

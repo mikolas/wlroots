@@ -50,6 +50,7 @@ Any break of the rules above is listed here with what breaks, why, the alternati
 | `kfx: reject empty dst_box in target chain pre-flight and clarify blue-noise table provenance` | `kajo-only` | `local` | `render/vulkan/kfx_draw.c`, `render/vulkan/shaders/output.frag`, `FORK.md` |
 | `kfx: add deterministic gen_blue_noise.py generator for output.frag` | `kajo-only` | `local` | `render/vulkan/shaders/output.frag`, `FORK.md` |
 | `kfx: add X6 SDR reference white override, BT.2390 PQ tone mapping, HDR headroom query, and HDR output matrix folding` | `kajo-only` | `local` | `include/render/vulkan.h`, `include/types/wlr_scene.h`, `render/vulkan/pass.c`, `render/vulkan/renderer.c`, `render/vulkan/shaders/output.frag`, `types/scene/wlr_scene.c`, `FORK.md` |
+| `kfx: quantize dithered output in FP32 in output.frag for cross-GPU 10-bit parity` | `kajo-only` | `local` | `render/vulkan/shaders/output.frag`, `FORK.md` |
 
 Status values: `local`, `submitted !<MR>`, `merged in <version>`, `dropped (<reason>)`. "Touches" lists modified upstream files; new files are not listed.
 
